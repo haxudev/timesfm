@@ -66,7 +66,7 @@ Copy `.env.example` and set backend variables with the
 | `CHECKPOINT` | Trusted server-side checkpoint; clients cannot override it |
 | `DEVICE` | Health/default device preference: `auto`, `cpu`, or `cuda` |
 | `CORS_ORIGINS` | JSON list or comma-separated allowed frontend origins |
-| `CACHE_TTL_SECONDS` | Successful market-data cache lifetime |
+| `CACHE_TTL_SECONDS`, `CACHE_MAX_ENTRIES` | Successful market-data cache lifetime and bound |
 | `MIN_CONTEXT_LENGTH`, `DEFAULT_CONTEXT_LENGTH`, `MAX_CONTEXT_LENGTH` | Context policy |
 | `MAX_HORIZON` | Forecast horizon policy |
 | `MODEL_ENABLED` | Disable all model use while retaining health/data APIs |
@@ -104,6 +104,9 @@ prices, keeps dates separate, creates contiguous float32 contexts, requires at
 least 32 valid target observations, and validates all model output shapes and
 values. TimesFM 3.0 returns exactly q0.1 through q0.9; unlike the older 2.5
 convention, there is no mean column at quantile index zero.
+Requests may use the API limit of 16,384 context values; the current TimesFM
+3 implementation consumes at most 15,360 and the response warns when it
+truncates a longer request.
 
 The approximate price path is:
 

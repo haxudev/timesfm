@@ -17,6 +17,7 @@ class Settings(BaseSettings):
   device: Literal["auto", "cpu", "cuda"] = "auto"
   cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:5173"]
   cache_ttl_seconds: int = Field(300, ge=0, le=86400)
+  cache_max_entries: int = Field(128, ge=1, le=10000)
   min_context_length: int = Field(32, ge=32, le=16384)
   default_context_length: int = Field(512, ge=32, le=16384)
   max_context_length: int = Field(16384, ge=32, le=16384)

@@ -59,6 +59,10 @@ def app_parts(market_frame):
     return adapter
 
   manager = ModelManager("trusted/checkpoint", factory=factory)
-  settings = Settings(cache_ttl_seconds=60)
+  settings = Settings(
+    cache_ttl_seconds=60,
+    default_context_length=32,
+    device="cpu",
+  )
   app = create_app(settings, provider, manager)
   return TestClient(app), provider, adapter, loads

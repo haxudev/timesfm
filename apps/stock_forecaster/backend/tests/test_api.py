@@ -40,6 +40,18 @@ def test_forecast_endpoint_uses_trusted_checkpoint_and_quantile_mapping(app_part
   assert loads == ["cpu"]
 
 
+def test_forecast_uses_configured_defaults_when_fields_are_omitted(app_parts):
+  client, _, _, loads = app_parts
+  response = client.post(
+    "/api/v1/forecasts",
+    json={"ticker": "SPY", "period": "1y", "horizon": 2},
+  )
+  assert response.status_code == 200
+  assert response.json()["context"]["used_length"] == 32
+  assert response.json()["model"]["device"] == "cpu"
+  assert loads == ["cpu"]
+
+
 def test_validation_errors_have_request_id(app_parts):
   client, _, _, _ = app_parts
   response = client.post(

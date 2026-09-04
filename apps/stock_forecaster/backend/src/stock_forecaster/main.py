@@ -4,7 +4,7 @@ import asyncio
 import logging
 import uuid
 from datetime import date
-from typing import Annotated
+from typing import Annotated, TypeVar
 
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,6 +46,7 @@ def create_app(
   market = MarketDataService(
     provider or YFinanceProvider(),
     config.cache_ttl_seconds,
+    config.cache_max_entries,
   )
   manager = model or ModelManager(
     config.checkpoint,
@@ -100,15 +101,32 @@ def create_app(
 
   @app.post("/api/v1/forecasts", response_model=ForecastResponse)
   async def forecast(request: ForecastRequest) -> ForecastResponse:
+    request = _apply_request_defaults(request, config)
     _validate_request_policy(request, config)
     return await asyncio.to_thread(forecast_service.run, request)
 
   @app.post("/api/v1/backtests", response_model=BacktestResponse)
   async def backtest(request: BacktestRequest) -> BacktestResponse:
+    request = _apply_request_defaults(request, config)
     _validate_request_policy(request, config)
     return await asyncio.to_thread(backtest_service.run, request)
 
   return app
+
+
+RequestModel = TypeVar("RequestModel", ForecastRequest, BacktestRequest)
+
+
+def _apply_request_defaults(
+  request: RequestModel,
+  settings: Settings,
+) -> RequestModel:
+  updates: dict[str, object] = {}
+  if "context_length" not in request.model_fields_set:
+    updates["context_length"] = settings.default_context_length
+  if "device" not in request.model_fields_set:
+    updates["device"] = settings.device
+  return request.model_copy(update=updates)
 
 
 def _validate_request_policy(

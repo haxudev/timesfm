@@ -13,6 +13,8 @@ from .schemas import (
   MetricSet,
 )
 
+_MODEL_MAX_CONTEXT = 15360
+
 
 def calculate_metrics(
   actual_returns: np.ndarray,
@@ -84,7 +86,8 @@ class BacktestService:
     )
     dates = [observation.date for observation in history.observations]
     returns = log_returns(prices)
-    first_origin = request.context_length
+    effective_context = min(request.context_length, _MODEL_MAX_CONTEXT)
+    first_origin = effective_context
     last_origin = len(returns) - request.horizon
     if last_origin < first_origin:
       raise AppError(
@@ -97,7 +100,7 @@ class BacktestService:
     windows: list[BacktestWindow] = []
     metric_windows: list[dict[str, MetricSet]] = []
     for origin in origins:
-      context = returns[origin - request.context_length : origin]
+      context = returns[origin - effective_context : origin]
       actual = returns[origin : origin + request.horizon]
       actual_prices = prices[origin + 1 : origin + request.horizon + 1]
       last_price = float(prices[origin])
@@ -127,7 +130,7 @@ class BacktestService:
       windows.append(
         BacktestWindow(
           origin=dates[origin],
-          context_start=dates[origin - request.context_length],
+          context_start=dates[origin - effective_context],
           context_end=dates[origin],
           forecast_end=dates[origin + request.horizon],
           metrics=metrics,
@@ -139,7 +142,14 @@ class BacktestService:
       observation_count=history.count,
       aggregate=aggregate_metrics(metric_windows),
       windows=windows,
-      warning=(
-        "Historical evaluation does not imply future performance or profitability."
+      warning=" ".join(
+        [
+          "Historical evaluation does not imply future performance or profitability.",
+          *(
+            ["TimesFM 3 truncated each context to 15,360 values."]
+            if request.context_length > _MODEL_MAX_CONTEXT
+            else []
+          ),
+        ]
       ),
     )

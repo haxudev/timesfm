@@ -12,6 +12,7 @@ from .model import ModelManager, ModelOutput
 from .schemas import ForecastPoint, ForecastRequest, ForecastResponse
 
 _QUANTILE_NAMES = [f"q0.{index}" for index in range(1, 10)]
+_MODEL_MAX_CONTEXT = 15360
 
 
 def future_business_days(last_date: date, horizon: int) -> list[date]:
@@ -56,7 +57,8 @@ class ForecastService:
         "At least 32 valid target observations are required.",
         422,
       )
-    context = np.ascontiguousarray(target[-request.context_length :], dtype=np.float32)
+    effective_context = min(request.context_length, _MODEL_MAX_CONTEXT)
+    context = np.ascontiguousarray(target[-effective_context:], dtype=np.float32)
     raw_output, device, device_warning = self.model.predict(
       context,
       request.horizon,
@@ -95,6 +97,10 @@ class ForecastService:
       warnings.append(device_warning)
     if request.target == "price":
       warnings.append("Direct price forecasting is experimental.")
+    if min(request.context_length, target.size) > _MODEL_MAX_CONTEXT:
+      warnings.append(
+        "TimesFM 3 uses at most 15,360 context values; the context was truncated."
+      )
     return ForecastResponse(
       ticker=history.ticker,
       target=request.target,

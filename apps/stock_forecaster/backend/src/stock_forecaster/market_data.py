@@ -149,10 +149,17 @@ def normalize_frame(
 
 
 class MarketDataService:
-  def __init__(self, provider: MarketDataProvider, ttl_seconds: int) -> None:
+  def __init__(
+    self,
+    provider: MarketDataProvider,
+    ttl_seconds: int,
+    max_entries: int = 128,
+  ) -> None:
     self.provider = provider
     self.ttl_seconds = ttl_seconds
+    self.max_entries = max_entries
     self._cache: dict[tuple[object, ...], tuple[float, ProviderResult]] = {}
+    self._inflight: dict[tuple[object, ...], threading.Event] = {}
     self._lock = threading.Lock()
 
   def get(
@@ -163,14 +170,33 @@ class MarketDataService:
   ) -> MarketDataResponse:
     normalized = normalize_ticker(ticker)
     key = (normalized, selection.period, selection.start, selection.end)
-    now = time.monotonic()
-    with self._lock:
-      cached = self._cache.get(key)
-      if cached is not None and now - cached[0] <= self.ttl_seconds:
-        result = cached[1]
-      else:
-        result = self.provider.fetch(normalized, selection)
-        response = normalize_frame(normalized, result, include_volume)
-        self._cache[key] = (now, result)
-        return response
-    return normalize_frame(normalized, result, include_volume)
+    while True:
+      now = time.monotonic()
+      with self._lock:
+        self._cache = {
+          cache_key: cached
+          for cache_key, cached in self._cache.items()
+          if now - cached[0] <= self.ttl_seconds
+        }
+        cached = self._cache.get(key)
+        if cached is not None:
+          return normalize_frame(normalized, cached[1], include_volume)
+        pending = self._inflight.get(key)
+        if pending is None:
+          pending = threading.Event()
+          self._inflight[key] = pending
+          break
+      pending.wait()
+
+    try:
+      result = self.provider.fetch(normalized, selection)
+      response = normalize_frame(normalized, result, include_volume)
+      with self._lock:
+        if len(self._cache) >= self.max_entries:
+          oldest = min(self._cache, key=lambda item: self._cache[item][0])
+          self._cache.pop(oldest)
+        self._cache[key] = (time.monotonic(), result)
+      return response
+    finally:
+      with self._lock:
+        self._inflight.pop(key).set()

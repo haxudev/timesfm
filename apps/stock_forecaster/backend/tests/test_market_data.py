@@ -1,13 +1,18 @@
+import time
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from stock_forecaster.errors import AppError
 from stock_forecaster.market_data import (
+  MarketDataService,
   ProviderResult,
   normalize_frame,
   normalize_ticker,
 )
+from stock_forecaster.schemas import DateSelection
 
 
 @pytest.mark.parametrize(
@@ -64,3 +69,28 @@ def test_empty_data_has_stable_error():
   with pytest.raises(AppError) as caught:
     normalize_frame("SPY", ProviderResult(pd.DataFrame()), False)
   assert caught.value.code == "market_data_empty"
+
+
+def test_concurrent_cache_misses_share_one_fetch():
+  frame = pd.DataFrame(
+    {"Close": [10.0, 11.0]},
+    index=pd.date_range("2024-01-01", periods=2),
+  )
+
+  class SlowProvider:
+    calls = 0
+
+    def fetch(self, ticker, selection):
+      self.calls += 1
+      time.sleep(0.02)
+      return ProviderResult(frame)
+
+  provider = SlowProvider()
+  service = MarketDataService(provider, ttl_seconds=60)
+  selection = DateSelection(period="1y")
+  with ThreadPoolExecutor(max_workers=4) as executor:
+    results = list(
+      executor.map(lambda _: service.get("SPY", selection), range(4))
+    )
+  assert provider.calls == 1
+  assert all(result.count == 2 for result in results)

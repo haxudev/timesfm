@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 def normalize_ticker(value: str) -> str:
   ticker = value.strip().upper()
-  if not _TICKER_RE.fullmatch(ticker):
+  if not _TICKER_RE.fullmatch(ticker) or not any(char.isalnum() for char in ticker):
     raise AppError(
       "invalid_ticker",
       "Ticker must contain only supported market-symbol characters.",
@@ -89,17 +89,23 @@ def normalize_frame(
   if frame.empty:
     raise AppError("market_data_empty", "No market data was found.", 404)
 
-  price_column = _find_column(frame, "Adj Close") or _find_column(frame, "Close")
+  adjusted_column = _find_column(frame, "Adj Close")
+  close_column = _find_column(frame, "Close")
+  price_column = adjusted_column or close_column
   if price_column is None:
     raise AppError(
       "market_data_malformed",
       "Market data did not include a usable price column.",
       502,
     )
-  selected_name = "Adj Close" if "adj close" in str(price_column).casefold() else "Close"
+  price_values = pd.to_numeric(frame[price_column], errors="coerce")
+  if adjusted_column is not None and price_values.isna().all() and close_column is not None:
+    price_column = close_column
+    price_values = pd.to_numeric(frame[price_column], errors="coerce")
+  selected_name = "Adj Close" if price_column == adjusted_column else "Close"
   volume_column = _find_column(frame, "Volume") if include_volume else None
 
-  data = pd.DataFrame({"price": pd.to_numeric(frame[price_column], errors="coerce")})
+  data = pd.DataFrame({"price": price_values})
   if volume_column is not None:
     data["volume"] = pd.to_numeric(frame[volume_column], errors="coerce")
   index = pd.to_datetime(frame.index, errors="coerce", utc=True)
@@ -164,5 +170,7 @@ class MarketDataService:
         result = cached[1]
       else:
         result = self.provider.fetch(normalized, selection)
+        response = normalize_frame(normalized, result, include_volume)
         self._cache[key] = (now, result)
+        return response
     return normalize_frame(normalized, result, include_volume)

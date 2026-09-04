@@ -8,6 +8,7 @@ from typing import Annotated
 
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import ValidationError
 
 from . import __version__
 from .backtesting import BacktestService
@@ -87,18 +88,52 @@ def create_app(
     end: date | None = None,
     include_volume: bool = False,
   ) -> MarketDataResponse:
-    selection = DateSelection(period=period, start=start, end=end)
+    try:
+      selection = DateSelection(period=period, start=start, end=end)
+    except ValidationError as error:
+      raise AppError(
+        "validation_error",
+        "The date selection is invalid.",
+        422,
+      ) from error
     return await asyncio.to_thread(market.get, ticker, selection, include_volume)
 
   @app.post("/api/v1/forecasts", response_model=ForecastResponse)
   async def forecast(request: ForecastRequest) -> ForecastResponse:
+    _validate_request_policy(request, config)
     return await asyncio.to_thread(forecast_service.run, request)
 
   @app.post("/api/v1/backtests", response_model=BacktestResponse)
   async def backtest(request: BacktestRequest) -> BacktestResponse:
+    _validate_request_policy(request, config)
     return await asyncio.to_thread(backtest_service.run, request)
 
   return app
+
+
+def _validate_request_policy(
+  request: ForecastRequest | BacktestRequest,
+  settings: Settings,
+) -> None:
+  if request.horizon > settings.max_horizon:
+    raise AppError(
+      "validation_error",
+      f"Horizon exceeds the server maximum of {settings.max_horizon}.",
+      422,
+    )
+  if not (
+    settings.min_context_length
+    <= request.context_length
+    <= settings.max_context_length
+  ):
+    raise AppError(
+      "validation_error",
+      (
+        "Context length must be between "
+        f"{settings.min_context_length} and {settings.max_context_length}."
+      ),
+      422,
+    )
 
 
 app = create_app()

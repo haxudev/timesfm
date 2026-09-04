@@ -152,8 +152,11 @@ class ModelManager:
       finally:
         self._inference.release()
       return validate_output(output.point, output.quantiles, horizon), device, warning
-    except AppError:
-      if self.state == "loading":
+    except AppError as error:
+      if self.state == "loading" or error.code in {
+        "model_inference_failed",
+        "model_output_invalid",
+      }:
         self.state = "error"
       raise
     except Exception as error:

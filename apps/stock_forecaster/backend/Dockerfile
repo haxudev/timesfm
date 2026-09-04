@@ -2,7 +2,9 @@ FROM python:3.11-slim
 
 WORKDIR /app
 COPY . /repo
-RUN pip install --no-cache-dir -e "/repo[torch]" \
+RUN pip install --no-cache-dir \
+    --index-url https://download.pytorch.org/whl/cpu torch \
+  && pip install --no-cache-dir -e "/repo[torch]" \
   && pip install --no-cache-dir -e /repo/apps/stock_forecaster/backend
 
 EXPOSE 8000

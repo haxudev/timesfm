@@ -51,7 +51,9 @@ def aggregate_metrics(windows: list[dict[str, MetricSet]]) -> dict[str, MetricSe
     metrics = [window[name] for window in windows]
     result[name] = MetricSet(
       return_mae=float(np.mean([item.return_mae for item in metrics])),
-      return_rmse=float(np.mean([item.return_rmse for item in metrics])),
+      return_rmse=float(
+        np.sqrt(np.mean([item.return_rmse**2 for item in metrics]))
+      ),
       directional_accuracy=float(
         np.mean([item.directional_accuracy for item in metrics])
       ),

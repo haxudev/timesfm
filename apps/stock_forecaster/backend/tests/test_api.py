@@ -68,3 +68,10 @@ def test_model_unavailable_uses_consistent_error(app_parts, monkeypatch):
   )
   assert response.status_code == 422
   assert response.json()["error"]["code"] == "device_unavailable"
+
+
+def test_invalid_market_date_range_uses_consistent_error(app_parts):
+  client, _, _, _ = app_parts
+  response = client.get("/api/v1/market-data/SPY?start=2024-01-01")
+  assert response.status_code == 422
+  assert response.json()["error"]["code"] == "validation_error"

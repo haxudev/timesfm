@@ -1,0 +1,25 @@
+services:
+  backend:
+    build:
+      context: ../..
+      dockerfile: apps/stock_forecaster/backend/Dockerfile
+    environment:
+      STOCK_FORECASTER_DEVICE: cpu
+      STOCK_FORECASTER_CORS_ORIGINS: '["http://localhost:5173"]'
+    ports:
+      - "8000:8000"
+    volumes:
+      - huggingface-cache:/root/.cache/huggingface
+
+  frontend:
+    build:
+      context: frontend
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+    depends_on:
+      - backend
+    ports:
+      - "5173:5173"
+
+volumes:
+  huggingface-cache:

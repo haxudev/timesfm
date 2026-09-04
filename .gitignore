@@ -21,6 +21,10 @@ gift-eval/
 TimesFM-3_multivariate/
 time_benchmark_leaderboard.csv
 *.html
+!apps/stock_forecaster/frontend/index.html
+apps/stock_forecaster/*.csv
+apps/stock_forecaster/.env
+apps/stock_forecaster/**/.env
 
 # Logs & Temporary files
 uv.lock

@@ -18,7 +18,7 @@ def test_normalize_ticker(raw, expected):
   assert normalize_ticker(raw) == expected
 
 
-@pytest.mark.parametrize("raw", ["", "../SPY", "SPY X", "A" * 16])
+@pytest.mark.parametrize("raw", ["", "^", "../SPY", "SPY X", "A" * 16])
 def test_invalid_ticker(raw):
   with pytest.raises(AppError) as caught:
     normalize_ticker(raw)
@@ -48,6 +48,16 @@ def test_falls_back_to_close_without_forward_filling():
   result = normalize_frame("SPY", ProviderResult(frame), False)
   assert result.price_column == "Close"
   assert [item.price for item in result.observations] == [10, 12]
+
+
+def test_falls_back_when_adjusted_close_is_empty():
+  frame = pd.DataFrame(
+    {"Adj Close": [np.nan, np.nan], "Close": [10.0, 11.0]},
+    index=pd.date_range("2024-01-01", periods=2),
+  )
+  result = normalize_frame("SPY", ProviderResult(frame), False)
+  assert result.price_column == "Close"
+  assert [item.price for item in result.observations] == [10, 11]
 
 
 def test_empty_data_has_stable_error():

@@ -4,7 +4,7 @@ import logging
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 import numpy as np
@@ -32,6 +32,13 @@ def normalize_ticker(value: str) -> str:
 class ProviderResult:
   frame: pd.DataFrame
   currency: str | None = None
+
+
+@dataclass
+class _PendingFetch:
+  event: threading.Event = field(default_factory=threading.Event)
+  result: ProviderResult | None = None
+  error: Exception | None = None
 
 
 class MarketDataProvider(Protocol):
@@ -159,7 +166,7 @@ class MarketDataService:
     self.ttl_seconds = ttl_seconds
     self.max_entries = max_entries
     self._cache: dict[tuple[object, ...], tuple[float, ProviderResult]] = {}
-    self._inflight: dict[tuple[object, ...], threading.Event] = {}
+    self._inflight: dict[tuple[object, ...], _PendingFetch] = {}
     self._lock = threading.Lock()
 
   def get(
@@ -183,10 +190,14 @@ class MarketDataService:
           return normalize_frame(normalized, cached[1], include_volume)
         pending = self._inflight.get(key)
         if pending is None:
-          pending = threading.Event()
+          pending = _PendingFetch()
           self._inflight[key] = pending
           break
-      pending.wait()
+      pending.event.wait()
+      if pending.error is not None:
+        raise pending.error
+      if pending.result is not None:
+        return normalize_frame(normalized, pending.result, include_volume)
 
     try:
       result = self.provider.fetch(normalized, selection)
@@ -196,7 +207,12 @@ class MarketDataService:
           oldest = min(self._cache, key=lambda item: self._cache[item][0])
           self._cache.pop(oldest)
         self._cache[key] = (time.monotonic(), result)
+        pending.result = result
       return response
+    except Exception as error:
+      pending.error = error
+      raise
     finally:
       with self._lock:
-        self._inflight.pop(key).set()
+        self._inflight.pop(key)
+        pending.event.set()

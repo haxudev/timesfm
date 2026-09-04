@@ -94,3 +94,26 @@ def test_concurrent_cache_misses_share_one_fetch():
     )
   assert provider.calls == 1
   assert all(result.count == 2 for result in results)
+
+
+def test_concurrent_fetch_failure_is_shared_without_caching():
+  class FailingProvider:
+    calls = 0
+
+    def fetch(self, ticker, selection):
+      self.calls += 1
+      time.sleep(0.02)
+      raise AppError("upstream_failed", "Unavailable", 502)
+
+  provider = FailingProvider()
+  service = MarketDataService(provider, ttl_seconds=60)
+  selection = DateSelection(period="1y")
+  with ThreadPoolExecutor(max_workers=4) as executor:
+    futures = [
+      executor.submit(service.get, "SPY", selection)
+      for _ in range(4)
+    ]
+    for future in futures:
+      with pytest.raises(AppError, match="Unavailable"):
+        future.result()
+  assert provider.calls == 1

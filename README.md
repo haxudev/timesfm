@@ -22,6 +22,14 @@ model developed by Google Research for time-series forecasting.
 
 This open version is not an officially supported Google product.
 
+## Unofficial stock forecasting demonstration
+
+[`apps/stock_forecaster/`](apps/stock_forecaster/) contains an unofficial,
+research-only FastAPI and React demonstration using TimesFM 3.0 to forecast
+stock log returns and compare leakage-safe walk-forward baselines. Forecasts
+are uncertain and are not financial advice. TimesFM 3.0 pretrained weights are
+restricted to non-commercial, non-production use under their separate license.
+
 **Latest Model Version:** TimesFM 3.0
 
 **Archived Model Versions:**

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import hashlib
+import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
 
+from .config import resolve_checkpoint_revision
 from .errors import AppError
 
 
@@ -18,6 +22,26 @@ class ModelOutput:
 
 class ModelAdapter(Protocol):
   def predict(self, context: np.ndarray, horizon: int) -> ModelOutput: ...
+
+  def predict_many(self, contexts: list[np.ndarray], horizon: int) -> list[ModelOutput]: ...
+
+
+def validate_contexts(contexts: list[np.ndarray], horizon: int) -> list[np.ndarray]:
+  if type(horizon) is not int or not 1 <= horizon <= 20 or not 1 <= len(contexts) <= 8:
+    raise AppError("validation_error", "Invalid inference batch or horizon.", 422)
+  normalized = []
+  for context in contexts:
+    try:
+      array = np.asarray(context)
+      if (
+        array.ndim != 1 or not 32 <= array.size <= 512 or array.dtype.kind not in "iuf"
+        or not np.isfinite(array).all() or np.any(array < -3.4e38) or np.any(array > 3.4e38)
+      ):
+        raise ValueError("Invalid context")
+      normalized.append(np.ascontiguousarray(array, dtype=np.float32))
+    except (TypeError, ValueError, OverflowError) as error:
+      raise AppError("validation_error", "Invalid inference context.", 422) from error
+  return normalized
 
 
 def cuda_available() -> bool:
@@ -46,13 +70,39 @@ def resolve_device(requested: str) -> tuple[str, str | None]:
 
 
 class TimesFM3Adapter:
-  def __init__(self, checkpoint: str, device: str) -> None:
+  def __init__(self, checkpoint: str, device: str, revision: str | None = None) -> None:
+    revision = resolve_checkpoint_revision(checkpoint, revision)
     try:
       from timesfm3 import ModelConfig, TimesFM3Evaluator
 
+      snapshot = Path(checkpoint).expanduser()
+      self.artifact_id: str | None = None
+      if not snapshot.is_dir():
+        from huggingface_hub import snapshot_download
+
+        snapshot = Path(snapshot_download(
+          repo_id=checkpoint,
+          revision=revision,
+          allow_patterns=["config.json", "model.safetensors"],
+        ))
+        if snapshot.parent.name == "snapshots" and re.fullmatch(r"[0-9a-f]{40}", snapshot.name):
+          if revision is not None and snapshot.name != revision:
+            raise ValueError("Resolved checkpoint does not match the requested revision")
+          self.artifact_id = f"hf:{checkpoint}@{snapshot.name}"
+      if self.artifact_id is None:
+        digest = hashlib.sha256()
+        for name in ("config.json", "model.safetensors"):
+          path = snapshot / name
+          digest.update(name.encode("ascii") + b"\0")
+          digest.update(path.stat().st_size.to_bytes(8, "big"))
+          with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+              digest.update(chunk)
+        self.artifact_id = f"sha256:{digest.hexdigest()}"
       config = ModelConfig(
-        checkpoint_path=checkpoint,
-        per_core_batch_size=1,
+        checkpoint_path=str(snapshot),
+        local_files_only=True,
+        per_core_batch_size=8,
         device=device,
       )
       self._model = TimesFM3Evaluator(config)
@@ -64,10 +114,16 @@ class TimesFM3Adapter:
       ) from error
 
   def predict(self, context: np.ndarray, horizon: int) -> ModelOutput:
+    return self._predict_batch([context], horizon)[0]
+
+  def predict_many(self, contexts: list[np.ndarray], horizon: int) -> list[ModelOutput]:
+    return self._predict_batch(validate_contexts(contexts, horizon), horizon)
+
+  def _predict_batch(self, contexts: list[np.ndarray], horizon: int) -> list[ModelOutput]:
     try:
       outputs = list(
         self._model.predict_batch(
-          contexts=[np.ascontiguousarray(context, dtype=np.float32)],
+          contexts=[np.ascontiguousarray(context, dtype=np.float32) for context in contexts],
           horizon=horizon,
           return_quantiles=True,
           use_symmetric_averaging=False,
@@ -81,9 +137,9 @@ class TimesFM3Adapter:
         "TimesFM inference failed.",
         503,
       ) from error
-    if len(outputs) != 1:
+    if len(outputs) != len(contexts):
       raise AppError("model_output_invalid", "TimesFM returned invalid output.", 502)
-    return validate_output(outputs[0].forecast, outputs[0].quantiles, horizon)
+    return [validate_output(output.forecast, output.quantiles, horizon) for output in outputs]
 
 
 def validate_output(
@@ -113,16 +169,23 @@ class ModelManager:
     self,
     checkpoint: str,
     enabled: bool = True,
-    factory: Callable[[str, str], ModelAdapter] = TimesFM3Adapter,
+    factory: Callable[[str, str], ModelAdapter] | None = None,
     max_concurrent: int = 1,
+    revision: str | None = None,
   ) -> None:
     self.checkpoint = checkpoint
+    self.checkpoint_revision = resolve_checkpoint_revision(checkpoint, revision)
     self.enabled = enabled
-    self.factory = factory
+    self.factory = factory or TimesFM3Adapter
     self._models: dict[str, ModelAdapter] = {}
     self._load_lock = threading.Lock()
     self._inference = threading.BoundedSemaphore(max_concurrent)
     self.state = "disabled" if not enabled else "not_loaded"
+
+  @property
+  def artifact_id(self) -> str | None:
+    identities = {getattr(model, "artifact_id", None) for model in self._models.copy().values()}
+    return identities.pop() if len(identities) == 1 else None
 
   def predict(
     self,
@@ -130,6 +193,26 @@ class ModelManager:
     horizon: int,
     requested_device: str,
   ) -> tuple[ModelOutput, str, str | None]:
+    outputs, device, warning = self._predict([context], horizon, requested_device, many=False)
+    return outputs[0], device, warning
+
+  def predict_many(
+    self,
+    contexts: list[np.ndarray],
+    horizon: int,
+    requested_device: str,
+  ) -> tuple[list[ModelOutput], str, str | None]:
+    contexts = validate_contexts(contexts, horizon)
+    return self._predict(contexts, horizon, requested_device, many=True)
+
+  def _predict(
+    self,
+    contexts: list[np.ndarray],
+    horizon: int,
+    requested_device: str,
+    *,
+    many: bool,
+  ) -> tuple[list[ModelOutput], str, str | None]:
     if not self.enabled:
       raise AppError("model_disabled", "Forecasting is disabled.", 503)
     device, warning = resolve_device(requested_device)
@@ -138,7 +221,10 @@ class ModelManager:
         model = self._models.get(device)
         if model is None:
           self.state = "loading"
-          model = self.factory(self.checkpoint, device)
+          if self.factory is TimesFM3Adapter:
+            model = self.factory(self.checkpoint, device, revision=self.checkpoint_revision)
+          else:
+            model = self.factory(self.checkpoint, device)
           self._models[device] = model
           self.state = "ready"
       if not self._inference.acquire(blocking=False):
@@ -148,10 +234,13 @@ class ModelManager:
           429,
         )
       try:
-        output = model.predict(context, horizon)
+        outputs = list(model.predict_many(contexts, horizon)) if many else [model.predict(contexts[0], horizon)]
+        if len(outputs) != len(contexts):
+          raise AppError("model_output_invalid", "TimesFM returned invalid output.", 502)
+        validated = [validate_output(output.point, output.quantiles, horizon) for output in outputs]
       finally:
         self._inference.release()
-      return validate_output(output.point, output.quantiles, horizon), device, warning
+      return validated, device, warning
     except AppError as error:
       if self.state == "loading" or error.code in {
         "model_inference_failed",

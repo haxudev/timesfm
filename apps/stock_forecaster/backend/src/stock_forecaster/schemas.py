@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -6,6 +6,45 @@ from pydantic import BaseModel, Field, model_validator
 Period = Literal["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "max"]
 Device = Literal["auto", "cpu", "cuda"]
 Target = Literal["log_return", "price"]
+QuoteSource = Literal["auto", "tencent", "sina"]
+
+
+class QuoteLevel(BaseModel):
+  price: float | None = Field(default=None, gt=0)
+  volume: float | None = Field(default=None, ge=0)
+
+
+class QuoteResponse(BaseModel):
+  ticker: str
+  instrument_type: Literal["stock", "index"] = "stock"
+  name: str = Field(min_length=1)
+  currency: Literal["CNY"] = "CNY"
+  source: Literal["tencent", "sina"]
+  as_of: datetime
+  last: float | None
+  previous_close: float | None
+  open: float | None
+  high: float | None
+  low: float | None
+  change: float | None
+  change_percent: float | None
+  volume: float | None = Field(ge=0)
+  amount: float | None = Field(ge=0)
+  bids: list[QuoteLevel] = Field(max_length=5)
+  asks: list[QuoteLevel] = Field(max_length=5)
+  pe_ratio: float | None = None
+  pb_ratio: float | None = None
+  market_cap: float | None = None
+  float_market_cap: float | None = None
+  turnover_rate: float | None = None
+  warnings: list[str] = Field(default_factory=list)
+
+  @model_validator(mode="after")
+  def validate_order_book(self) -> "QuoteResponse":
+    expected = 0 if self.instrument_type == "index" else 5
+    if len(self.bids) != expected or len(self.asks) != expected:
+      raise ValueError("Order book size does not match instrument type")
+    return self
 
 
 class DateSelection(BaseModel):
@@ -57,6 +96,9 @@ class MarketDataResponse(BaseModel):
   end: date
   count: int
   currency: str | None
+  source: str = "yfinance"
+  instrument_type: Literal["stock", "index"] = "stock"
+  name: str | None = None
   observations: list[MarketObservation]
 
 

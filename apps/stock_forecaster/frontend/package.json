@@ -9,17 +9,21 @@
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint .",
     "test": "vitest",
+    "test:e2e": "playwright test",
     "preview": "vite preview"
   },
   "dependencies": {
     "@tanstack/react-query": "5.102.8",
+    "lucide-react": "^1.41.0",
     "plotly.js-dist-min": "4.0.0",
+    "plotly.js-locales": "^4.0.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-plotly.js": "4.1.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
+    "@playwright/test": "1.63.0",
     "@testing-library/jest-dom": "7.0.1",
     "@testing-library/react": "16.3.3",
     "@testing-library/user-event": "14.6.7",

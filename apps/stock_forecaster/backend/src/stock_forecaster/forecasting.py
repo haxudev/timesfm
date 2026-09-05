@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from datetime import date
+from functools import lru_cache
 
+import exchange_calendars
 import numpy as np
 import pandas as pd
 
+from .a_share import a_share_symbol
 from .errors import AppError
 from .features import log_returns, returns_to_prices, validate_prices
 from .market_data import MarketDataService
@@ -15,8 +18,29 @@ _QUANTILE_NAMES = [f"q0.{index}" for index in range(1, 10)]
 _MODEL_MAX_CONTEXT = 15360
 
 
-def future_business_days(last_date: date, horizon: int) -> list[date]:
-  return [value.date() for value in pd.bdate_range(last_date, periods=horizon + 1)[1:]]
+@lru_cache(maxsize=1)
+def _china_calendar():
+  return exchange_calendars.get_calendar("XSHG", start="1990-12-19")
+
+
+def future_business_days(
+  last_date: date, horizon: int, ticker: str = "SPY",
+) -> list[date]:
+  if a_share_symbol(ticker) is None:
+    return [value.date() for value in pd.bdate_range(last_date, periods=horizon + 1)[1:]]
+  try:
+    calendar = _china_calendar()
+    start = calendar.sessions.searchsorted(pd.Timestamp(last_date), side="right")
+    sessions = calendar.sessions[start : start + horizon]
+    if last_date < calendar.first_session.date() or len(sessions) != horizon:
+      raise ValueError("Outside published trading calendar")
+    return [value.date() for value in sessions]
+  except Exception as error:
+    raise AppError(
+      "calendar_unavailable",
+      "预测日期超出已发布的中国交易日历范围，请缩短预测周期或更新交易日历。",
+      422,
+    ) from error
 
 
 def _price_output_to_returns(output: ModelOutput, last_price: float) -> ModelOutput:
@@ -45,6 +69,7 @@ class ForecastService:
 
   def run(self, request: ForecastRequest) -> ForecastResponse:
     history = self.market.get(request.ticker, request, include_volume=True)
+    dates = future_business_days(history.end, request.horizon, history.ticker)
     prices = validate_prices(
       np.array([observation.price for observation in history.observations])
     )
@@ -71,7 +96,6 @@ class ForecastService:
     )
     point_prices = returns_to_prices(float(prices[-1]), output.point)
     quantile_prices = returns_to_prices(float(prices[-1]), output.quantiles)
-    dates = future_business_days(history.end, request.horizon)
     points = [
       ForecastPoint(
         date=dates[index],
@@ -87,19 +111,22 @@ class ForecastService:
       for index in range(request.horizon)
     ]
     warnings = [
-      "Future dates use business days; exchange-specific holidays may be absent.",
       (
-        "Accumulated marginal return quantiles are approximate price paths, "
-        "not joint path confidence intervals."
+        "预测日期按中国市场交易日历生成，遇休市日顺延。"
+        if a_share_symbol(history.ticker)
+        else "海外市场预测日期暂按工作日生成，可能未排除当地休市日。"
+      ),
+      (
+        "逐日收益率分位数累积形成近似价格路径，不代表整条路径的联合置信区间。"
       ),
     ]
     if device_warning:
       warnings.append(device_warning)
     if request.target == "price":
-      warnings.append("Direct price forecasting is experimental.")
+      warnings.append("直接预测价格或点位为实验功能。")
     if min(request.context_length, target.size) > _MODEL_MAX_CONTEXT:
       warnings.append(
-        "TimesFM 3 uses at most 15,360 context values; the context was truncated."
+        "TimesFM 3 最多使用 15,360 条上下文，本次已截断超出部分。"
       )
     return ForecastResponse(
       ticker=history.ticker,

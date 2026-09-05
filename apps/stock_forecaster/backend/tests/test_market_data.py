@@ -23,6 +23,22 @@ def test_normalize_ticker(raw, expected):
   assert normalize_ticker(raw) == expected
 
 
+@pytest.mark.parametrize(
+  ("raw", "expected"),
+  [
+    ("600519", "600519.SS"),
+    (" sh600519 ", "600519.SS"),
+    ("600519.SH", "600519.SS"),
+    ("000001", "000001.SZ"),
+    ("sz300750", "300750.SZ"),
+    ("bj920001", "920001.BJ"),
+    ("920001", "920001.BJ"),
+  ],
+)
+def test_a_share_aliases_share_one_canonical_ticker(raw, expected):
+  assert normalize_ticker(raw) == expected
+
+
 @pytest.mark.parametrize("raw", ["", "^", "../SPY", "SPY X", "A" * 16])
 def test_invalid_ticker(raw):
   with pytest.raises(AppError) as caught:

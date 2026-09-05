@@ -31,3 +31,6 @@ uv.lock
 development_setup.md
 debug.log
 *.log
+.local/
+apps/stock_forecaster/frontend/test-results/
+apps/stock_forecaster/frontend/playwright-report/

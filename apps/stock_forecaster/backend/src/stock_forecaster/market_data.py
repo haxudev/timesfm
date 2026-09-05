@@ -5,7 +5,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Literal, Protocol
 
 import numpy as np
 import pandas as pd
@@ -19,6 +19,19 @@ logger = logging.getLogger(__name__)
 
 def normalize_ticker(value: str) -> str:
   ticker = value.strip().upper()
+  prefixed = re.fullmatch(r"(SH|SZ|BJ)(\d{6})", ticker)
+  if prefixed:
+    exchange, code = prefixed.groups()
+    ticker = f"{code}.{'SS' if exchange == 'SH' else exchange}"
+  elif re.fullmatch(r"\d{6}\.SH", ticker):
+    ticker = ticker[:-2] + "SS"
+  elif re.fullmatch(r"\d{6}", ticker):
+    if ticker.startswith("6"):
+      ticker += ".SS"
+    elif ticker.startswith(("0", "3")):
+      ticker += ".SZ"
+    elif ticker.startswith(("4", "8", "92")):
+      ticker += ".BJ"
   if not _TICKER_RE.fullmatch(ticker) or not any(char.isalnum() for char in ticker):
     raise AppError(
       "invalid_ticker",
@@ -32,6 +45,9 @@ def normalize_ticker(value: str) -> str:
 class ProviderResult:
   frame: pd.DataFrame
   currency: str | None = None
+  source: str = "yfinance"
+  instrument_type: Literal["stock", "index"] = "stock"
+  name: str | None = None
 
 
 @dataclass
@@ -151,6 +167,9 @@ def normalize_frame(
     end=observations[-1].date,
     count=len(observations),
     currency=result.currency,
+    source=result.source,
+    instrument_type=result.instrument_type,
+    name=result.name,
     observations=observations,
   )
 

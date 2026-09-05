@@ -11,12 +11,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 
 from . import __version__
+from .a_share import RoutedMarketDataProvider
 from .backtesting import BacktestService
 from .config import Settings, get_settings
 from .errors import AppError, install_error_handlers
 from .forecasting import ForecastService
-from .market_data import MarketDataProvider, MarketDataService, YFinanceProvider
+from .market_data import MarketDataProvider, MarketDataService
 from .model import ModelManager, resolve_device
+from .quotes import QuoteService
 from .schemas import (
   BacktestRequest,
   BacktestResponse,
@@ -25,6 +27,8 @@ from .schemas import (
   ForecastResponse,
   MarketDataResponse,
   Period,
+  QuoteResponse,
+  QuoteSource,
 )
 
 
@@ -32,6 +36,7 @@ def create_app(
   settings: Settings | None = None,
   provider: MarketDataProvider | None = None,
   model: ModelManager | None = None,
+  quote_service: QuoteService | None = None,
 ) -> FastAPI:
   config = settings or get_settings()
   logging.basicConfig(level=config.log_level)
@@ -40,11 +45,11 @@ def create_app(
     CORSMiddleware,
     allow_origins=config.cors_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "X-Request-ID"],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type", "X-Request-ID", "Idempotency-Key"],
   )
   market = MarketDataService(
-    provider or YFinanceProvider(),
+    provider or RoutedMarketDataProvider(),
     config.cache_ttl_seconds,
     config.cache_max_entries,
   )
@@ -52,9 +57,11 @@ def create_app(
     config.checkpoint,
     enabled=config.model_enabled,
     max_concurrent=config.max_concurrent_inferences,
+    revision=config.checkpoint_revision,
   )
   forecast_service = ForecastService(market, manager)
   backtest_service = BacktestService(market, manager)
+  quotes = quote_service or QuoteService()
 
   @app.middleware("http")
   async def request_id_middleware(request: Request, call_next):
@@ -68,6 +75,10 @@ def create_app(
 
   install_error_handlers(app)
 
+  from .research.api import install_research_api
+
+  install_research_api(app, config, market, manager)
+
   @app.get("/api/v1/health")
   async def health() -> dict[str, str]:
     try:
@@ -80,6 +91,10 @@ def create_app(
       "version": __version__,
       "model_state": manager.state,
     }
+
+  @app.get("/api/v1/quotes/{ticker}", response_model=QuoteResponse)
+  async def quote(ticker: str, source: QuoteSource = "auto") -> QuoteResponse:
+    return await asyncio.to_thread(quotes.get, ticker, source)
 
   @app.get("/api/v1/market-data/{ticker}", response_model=MarketDataResponse)
   async def market_data(

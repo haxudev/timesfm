@@ -4,7 +4,15 @@ version = "0.1.0"
 description = "Research-only TimesFM 3.0 stock forecasting demonstration backend"
 requires-python = ">=3.10"
 dependencies = [
+  "akshare==1.18.94",
+  "duckdb==1.5.5",
+  "lightgbm==4.6.0",
+  "scikit-learn==1.8.0",
+  "arch==8.0.0",
+  "APScheduler==3.11.0",
+  "exchange-calendars==4.13.2",
   "fastapi==0.141.1",
+  "httpx==0.28.1",
   "numpy==2.4.2",
   "pandas==3.0.5",
   "pydantic==2.12.5",
@@ -13,9 +21,11 @@ dependencies = [
   "yfinance==1.7.0",
 ]
 
+[project.scripts]
+stock-forecaster-research = "stock_forecaster.research.cli:main"
+
 [project.optional-dependencies]
 dev = [
-  "httpx==0.28.1",
   "pytest==9.1.1",
   "ruff==0.16.6",
 ]
@@ -26,6 +36,9 @@ pythonpath = ["src"]
 [tool.ruff]
 line-length = 88
 indent-width = 2
+
+[tool.ruff.lint.per-file-ignores]
+"src/stock_forecaster/research/{cli,runtime,service,worker}.py" = ["BLE001"]
 
 [build-system]
 requires = ["setuptools>=61"]

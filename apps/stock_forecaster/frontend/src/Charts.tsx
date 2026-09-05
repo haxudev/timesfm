@@ -1,4 +1,7 @@
 import Plot from 'react-plotly.js'
+import type { Config } from 'plotly.js'
+import chineseLocale from 'plotly.js-locales/zh-cn'
+import { priceColumns, valueUnit } from './i18n'
 import type { ForecastResponse } from './types'
 
 function accumulatedQuantilePrices(data: ForecastResponse, name: string): number[] {
@@ -15,6 +18,19 @@ const layout = {
   paper_bgcolor: 'transparent',
   plot_bgcolor: 'transparent',
   legend: { orientation: 'h' as const },
+  font: { family: 'Microsoft YaHei, sans-serif' },
+  xaxis: { tickformat: '%m月%d日', hoverformat: '%Y年%m月%d日' },
+}
+
+const chartConfig: Partial<Config> = {
+  responsive: true, displaylogo: false, locale: 'zh-cn',
+  locales: { 'zh-cn': chineseLocale },
+  toImageButtonOptions: { filename: '预测图表' },
+  modeBarButtons: [
+    ['toImage'],
+    ['zoom2d', 'pan2d', 'zoomIn2d', 'zoomOut2d', 'autoScale2d', 'resetScale2d'],
+    ['select2d', 'lasso2d'],
+  ],
 }
 
 export function HistoricalChart({ data }: { data: ForecastResponse }) {
@@ -26,13 +42,13 @@ export function HistoricalChart({ data }: { data: ForecastResponse }) {
         y: recent.map((item) => item.price),
         type: 'scatter',
         mode: 'lines',
-        name: `${data.history.price_column} price`,
+        name: priceColumns[data.history.price_column] ?? '历史收盘值',
         line: { color: '#2364aa' },
       }]}
-      layout={{ ...layout, title: { text: 'Historical price' }, yaxis: { title: { text: 'Price' } } }}
+      layout={{ ...layout, title: { text: '历史走势' }, yaxis: { title: { text: valueUnit(data.history) } } }}
       useResizeHandler
       className="chart"
-      config={{ responsive: true, displaylogo: false }}
+      config={chartConfig}
     />
   )
 }
@@ -54,7 +70,7 @@ export function ForecastPriceChart({ data }: { data: ForecastResponse }) {
           line: { width: 0 },
           hoverinfo: 'skip',
           showlegend: false,
-          name: 'Approx. q80',
+          name: '近似八十分位数',
         },
         {
           x: dates,
@@ -64,7 +80,7 @@ export function ForecastPriceChart({ data }: { data: ForecastResponse }) {
           fill: 'tonexty',
           fillcolor: 'rgba(0, 114, 178, 0.18)',
           line: { width: 0 },
-          name: 'Approx. q20–q80',
+          name: '近似二十至八十分位区间',
         },
         {
           x: dates,
@@ -74,7 +90,7 @@ export function ForecastPriceChart({ data }: { data: ForecastResponse }) {
           line: { width: 0 },
           hoverinfo: 'skip',
           showlegend: false,
-          name: 'Approx. q90',
+          name: '近似九十分位数',
         },
         {
           x: dates,
@@ -84,7 +100,7 @@ export function ForecastPriceChart({ data }: { data: ForecastResponse }) {
           fill: 'tonexty',
           fillcolor: 'rgba(230, 159, 0, 0.22)',
           line: { width: 0 },
-          name: 'Approx. q10–q90',
+          name: '近似十分位至九十分位区间',
         },
         {
           x: dates,
@@ -92,7 +108,7 @@ export function ForecastPriceChart({ data }: { data: ForecastResponse }) {
           type: 'scatter',
           mode: 'lines+markers',
           line: { color: '#d55e00' },
-          name: 'Point forecast',
+          name: '预测值',
         },
         {
           x: history.map((item) => item.date),
@@ -100,12 +116,13 @@ export function ForecastPriceChart({ data }: { data: ForecastResponse }) {
           type: 'scatter',
           mode: 'lines',
           line: { color: '#2364aa' },
-          name: 'Recent history',
+          name: '近期历史',
         },
       ]}
       layout={{
         ...layout,
-        title: { text: 'Approximate forecast price path' },
+        title: { text: '预测走势与近似区间' },
+        yaxis: { title: { text: valueUnit(data.history) } },
         shapes: [{
           type: 'line',
           x0: origin,
@@ -118,7 +135,7 @@ export function ForecastPriceChart({ data }: { data: ForecastResponse }) {
       }}
       useResizeHandler
       className="chart"
-      config={{ responsive: true, displaylogo: false }}
+      config={chartConfig}
     />
   )
 }
@@ -145,7 +162,7 @@ export function ForecastReturnChart({ data }: { data: ForecastResponse }) {
           fill: 'tonexty',
           fillcolor: 'rgba(0, 158, 115, 0.2)',
           line: { width: 0 },
-          name: 'q10–q90',
+          name: '十分位至九十分位区间',
         },
         {
           x: dates,
@@ -153,12 +170,12 @@ export function ForecastReturnChart({ data }: { data: ForecastResponse }) {
           type: 'scatter',
           mode: 'lines+markers',
           line: { color: '#0072b2' },
-          name: 'Point return',
+          name: '预测对数收益率',
         },
       ]}
       layout={{
         ...layout,
-        title: { text: 'Forecast log returns' },
+        title: { text: '预测对数收益率' },
         yaxis: { tickformat: '.2%' },
         shapes: [{
           type: 'line',
@@ -171,7 +188,7 @@ export function ForecastReturnChart({ data }: { data: ForecastResponse }) {
       }}
       useResizeHandler
       className="chart"
-      config={{ responsive: true, displaylogo: false }}
+      config={chartConfig}
     />
   )
 }

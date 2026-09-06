@@ -27,6 +27,9 @@ apps/stock_forecaster/.env
 apps/stock_forecaster/**/.env
 
 # Logs & Temporary files
+.env
+.env.*
+!.env.example
 uv.lock
 development_setup.md
 debug.log

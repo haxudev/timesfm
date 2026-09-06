@@ -5,6 +5,7 @@ description = "Research-only TimesFM 3.0 stock forecasting demonstration backend
 requires-python = ">=3.10"
 dependencies = [
   "akshare==1.18.94",
+  "baostock==0.9.3",
   "duckdb==1.5.5",
   "lightgbm==4.6.0",
   "scikit-learn==1.8.0",

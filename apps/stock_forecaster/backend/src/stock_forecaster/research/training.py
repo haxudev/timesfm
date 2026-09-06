@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from ..forecasting import _china_calendar
@@ -31,6 +32,11 @@ TRAINING_CODES = {
   "insufficient_training_features", "missing_pit_industry", "ambiguous_pit_industry",
   "one_class_training", "one_class_calibration", "garch_nonconvergence",
   "invalid_garch_parameters", "invalid_split_bounds", "training_failed",
+  "invalid_training_mode", "invalid_feature_set", "research_feature_set_required",
+  "historical_research_candidate_only",
+  "mixed_dataset_basis", "missing_benchmark", "invalid_collection_report",
+  "invalid_dataset_manifest", "duplicate_bars", "off_calendar_bars",
+  "missing_bar_columns", "invalid_bars", "duplicate_index_bars",
 }
 
 
@@ -45,8 +51,19 @@ def _hash_file(path):
 
 
 def load_dataset(store, *, bars=None, index=None, industries=None, dataset_dir=None,
-                 max_rows=250000, max_bytes=512 * 1024 * 1024):
+                 max_rows=250000, max_bytes=512 * 1024 * 1024,
+                 mode="strict_pit", feature_set="research_features_v1"):
+  if mode not in {"strict_pit", "historical_research"}:
+    raise ValueError("invalid_training_mode")
+  if feature_set not in {"research_features_v1", "price_index_v1"}:
+    raise ValueError("invalid_feature_set")
+  if mode == "historical_research" and feature_set != "price_index_v1":
+    raise ValueError("research_feature_set_required")
   identifiers = {"bars": bars, "index": index, "industries": industries}
+  required = {"bars", "index"} if feature_set == "price_index_v1" else set(identifiers)
+  if "industries" not in required and industries is not None:
+    raise ValueError("research_feature_set_required")
+  identifiers = {name: value for name, value in identifiers.items() if name in required}
   if dataset_dir is not None:
     if any(identifiers.values()):
       raise ValueError("choose_snapshot_ids_or_dataset_directory")
@@ -56,7 +73,7 @@ def load_dataset(store, *, bars=None, index=None, industries=None, dataset_dir=N
       raise ValueError("dataset_manifest_too_large")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     identifiers = manifest.get("snapshot_ids", {})
-    if set(identifiers) != {"bars", "index", "industries"}:
+    if set(identifiers) != required:
       raise ValueError("verified_snapshot_ids_required")
     for name, identifier in identifiers.items():
       store.snapshot_metadata(identifier)
@@ -65,8 +82,12 @@ def load_dataset(store, *, bars=None, index=None, industries=None, dataset_dir=N
         raise ValueError("dataset_snapshot_mismatch")
   if not all(identifiers.values()):
     raise ValueError(INDUSTRY_BLOCKER)
-  frames = {}
-  for name in ("industries", "bars", "index"):
+  frames = {"industries": None}
+  limitations = [] if mode == "strict_pit" else [
+    "historical_price_vintage_unverified", "historical_universe_unverified",
+    "industry_features_not_in_specification", "not_point_in_time_backtest",
+  ]
+  for name in (name for name in ("industries", "bars", "index") if name in required):
     identifier = identifiers[name]
     metadata = store.snapshot_metadata(identifier)
     provenance = metadata.get("provenance", {})
@@ -77,8 +98,9 @@ def load_dataset(store, *, bars=None, index=None, industries=None, dataset_dir=N
               for field in ("source", "approved_by", "evidence"))
       and provenance.get("known_at_semantics") == "publication_timestamp"
     )
-    if not valid:
+    if mode == "strict_pit" and not valid:
       raise ValueError(INDUSTRY_BLOCKER if name == "industries" else "verified_dataset_required")
+    limitations.extend(metadata.get("blockers", []))
     expected_kind = "industry" if name == "industries" else name
     if metadata.get("kind") != expected_kind:
       raise ValueError("dataset_kind_mismatch")
@@ -92,6 +114,8 @@ def load_dataset(store, *, bars=None, index=None, industries=None, dataset_dir=N
     if "known_at" not in frame or frame.known_at.isna().any():
       raise ValueError("known_at_required")
     known = pd.to_datetime(frame["known_at"])
+    if known.isna().any():
+      raise ValueError("known_at_required")
     if known.dt.tz is not None:
       known = known.dt.tz_convert("Asia/Shanghai").dt.tz_localize(None)
     frame["known_at"] = known
@@ -101,13 +125,90 @@ def load_dataset(store, *, bars=None, index=None, industries=None, dataset_dir=N
       frame["date"] = pd.to_datetime(frame["date"])
       if frame.date.dt.tz is not None or frame.date.max() > pd.Timestamp.now().normalize():
         raise ValueError("uncompleted_training_dates")
-      if (known > frame.date + pd.Timedelta(hours=15)).any():
+      if mode == "strict_pit" and (known > frame.date + pd.Timedelta(hours=15)).any():
         raise ValueError("known_at_after_session")
     frames[name] = frame
   first, last = frames["bars"].date.min(), frames["bars"].date.max()
+  if mode == "historical_research":
+    basis = {name: store.snapshot_metadata(identifiers[name]) for name in ("bars", "index")}
+    if (basis["bars"].get("source") != basis["index"].get("source")
+        or basis["bars"].get("adjustment") != "qfq"
+        or basis["index"].get("adjustment") != "raw"):
+      raise ValueError("mixed_dataset_basis")
+    for name in ("bars", "index"):
+      if "source" in frames[name] and not frames[name].source.eq(basis[name]["source"]).all():
+        raise ValueError("mixed_dataset_basis")
+      if "adjustment" in frames[name] and not frames[name].adjustment.eq(basis[name]["adjustment"]).all():
+        raise ValueError("mixed_dataset_basis")
   frames["sessions"] = _china_calendar().sessions_in_range(first, last)
   frames["ids"] = identifiers
+  frames.update(mode=mode, feature_set=feature_set, limitations=sorted(set(limitations)))
   return frames
+
+
+def prepare_training_data(dataset, *, max_rows=250000, max_bytes=512 * 1024 * 1024):
+  bars = dataset["bars"].copy()
+  sessions = dataset["sessions"]
+  fields = ["open", "high", "low", "close", "volume", "amount"]
+  if not {"ticker", "date", *fields} <= set(bars):
+    raise ValueError("missing_bar_columns")
+  numeric = bars[fields].apply(pd.to_numeric, errors="coerce")
+  valid = pd.Series(np.isfinite(numeric).all(axis=1), index=bars.index)
+  valid &= numeric.gt(0).all(axis=1)
+  valid &= numeric.high.ge(numeric[["open", "close", "low"]].max(axis=1))
+  valid &= numeric.low.le(numeric[["open", "close", "high"]].min(axis=1))
+  bars[fields] = numeric
+  quality = {"invalid_stock_rows": int((~valid).sum()), "excluded_feature_rows": 0,
+             "missing_stock_sessions": 0, "stock_rows": len(bars),
+             "sessions": len(sessions), "tickers": int(bars.ticker.nunique())}
+  if dataset["mode"] == "strict_pit" and not valid.all():
+    raise ValueError("invalid_bars")
+  if dataset["mode"] == "historical_research":
+    bars.loc[~valid, "close"] = np.nan
+  labels = make_labels(bars, sessions)
+  usable = bars.loc[valid] if dataset["mode"] == "historical_research" else bars
+  spans = bars.groupby("ticker").date.agg(["min", "max"])
+  for ticker, span in spans.iterrows():
+    quality["missing_stock_sessions"] += int(
+      ((sessions >= span["min"]) & (sessions <= span["max"])).sum()
+      - bars.loc[bars.ticker == ticker, "date"].nunique())
+  benchmark = dataset["index"]
+  if benchmark.date.duplicated().any():
+    raise ValueError("duplicate_index_bars")
+  benchmark_close = pd.to_numeric(benchmark.set_index("date").close, errors="coerce").reindex(sessions)
+  features, count = [], 0
+  for position, origin in enumerate(sessions[20:], start=20):
+    window = sessions[position - 20:position + 1]
+    window_bars = usable.loc[usable.date.between(window[0], origin)]
+    if dataset["mode"] == "historical_research":
+      expected = int(((spans["min"] <= origin) & (spans["max"] >= origin)).sum())
+      counts = window_bars.groupby("ticker").date.nunique()
+      eligible = counts.index[counts == 21]
+      values = benchmark_close.reindex(window).to_numpy(float)
+      if not (np.isfinite(values).all() and (values > 0).all()):
+        eligible = eligible[:0]
+      quality["excluded_feature_rows"] += expected - len(eligible)
+      if eligible.empty:
+        continue
+      selected = window_bars.loc[window_bars.ticker.isin(eligible)]
+    else:
+      selected = bars
+    matrix = build_features(selected, benchmark, dataset["industries"], origin,
+                            sessions=sessions, feature_set=dataset["feature_set"])
+    matrix = matrix.reset_index()
+    matrix["origin"] = origin
+    count += len(matrix)
+    if count > max_rows:
+      raise ValueError("training_row_budget_exceeded")
+    features.append(matrix)
+  if not features:
+    raise ValueError("insufficient_training_features")
+  feature_frame = pd.concat(features, ignore_index=True)
+  if feature_frame.memory_usage(deep=True).sum() + labels.memory_usage(deep=True).sum() > max_bytes:
+    raise ValueError("training_memory_budget_exceeded")
+  quality["feature_rows"] = len(feature_frame)
+  quality["mature_label_rows"] = int(labels["return"].notna().sum())
+  return feature_frame, labels, quality
 
 
 @contextmanager
@@ -146,9 +247,13 @@ def _publish_artifact(models, staging, identifier):
 def train(store, *, bars=None, index=None, industries=None, dataset_dir=None,
           train_end=None, validation_end=None, calibration_end=None, test_end=None,
           n_estimators=100, num_threads=2, max_rows=250000,
-          max_bytes=512 * 1024 * 1024, activate=True):
+    max_bytes=512 * 1024 * 1024, activate=True,
+    mode="strict_pit", feature_set="research_features_v1"):
+  if mode == "historical_research" and activate:
+    raise ValueError("historical_research_candidate_only")
   dataset = load_dataset(store, bars=bars, index=index, industries=industries,
-                         dataset_dir=dataset_dir, max_rows=max_rows, max_bytes=max_bytes)
+       dataset_dir=dataset_dir, max_rows=max_rows, max_bytes=max_bytes,
+       mode=mode, feature_set=feature_set)
   ends = [train_end, validation_end, calibration_end, test_end]
   if any(value is None for value in ends):
     raise ValueError("chronological_split_bounds_required")
@@ -167,27 +272,13 @@ def train(store, *, bars=None, index=None, industries=None, dataset_dir=None,
 
     with tempfile.TemporaryDirectory(prefix=".candidate-", dir=models) as temporary:
       stage = Path(temporary)
-      features = []
-      feature_columns = None
-      for origin in dataset["sessions"][20:]:
-        matrix = build_features(dataset["bars"], dataset["index"], dataset["industries"],
-                                origin, sessions=dataset["sessions"])
-        feature_columns = list(matrix.columns)
-        matrix = matrix.reset_index()
-        matrix["origin"] = origin
-        features.append(matrix)
-        if sum(len(frame) for frame in features) > max_rows:
-          raise ValueError("training_row_budget_exceeded")
-      if not features:
-        raise ValueError("insufficient_training_features")
-      feature_frame = pd.concat(features, ignore_index=True)
-      del features
-      if feature_frame.memory_usage(deep=True).sum() > max_bytes:
-        raise ValueError("training_memory_budget_exceeded")
-      labels = make_labels(dataset["bars"], dataset["sessions"])
+      feature_frame, labels, quality = prepare_training_data(dataset, max_rows=max_rows, max_bytes=max_bytes)
+      feature_columns = [name for name in feature_frame if name not in {"ticker", "origin"}]
       result = {"status": "research", "artifacts": {}, "metrics": {}, "splits": {},
                 "dataset_ids": dataset["ids"], "as_of": datetime.now(timezone.utc).isoformat(),
-                "limitations": ["single_chronological_fold_not_validated", "daily_variance_proxy_only"]}
+                "mode": mode, "feature_set": feature_set, "quality": quality,
+                "limitations": dataset["limitations"] + [
+                  "single_chronological_fold_not_validated", "daily_variance_proxy_only"]}
       trained_models = []
       for horizon in (1, 5, 20):
         frame = feature_frame.merge(labels.loc[labels.horizon == horizon], on=["ticker", "origin"],
@@ -196,13 +287,18 @@ def train(store, *, bars=None, index=None, industries=None, dataset_dir=None,
         if any(part.empty for part in parts.values()):
           raise ValueError("empty_purged_partition")
         trained_through = parts["calibration"].target_date.max().date().isoformat()
-        schema = digest({"version": "research_features_v1", "columns": feature_columns,
-                         "categorical_vocabulary": {"industry": sorted(parts["train"].industry.astype(str).unique())},
+        vocabulary = ({"industry": sorted(parts["train"].industry.astype(str).unique())}
+                if "industry" in feature_columns else {})
+        schema = digest({"version": feature_set, "columns": feature_columns,
+             "categorical_vocabulary": vocabulary,
                          "missing_policy": "native_nan_unknown_category"})
         metadata = {"feature_schema": schema, "trained_through": trained_through,
                     "as_of": result["as_of"], "dataset_ids": dataset["ids"],
                     "status": "research", "split_ends": dict(zip(parts, ends, strict=True)),
-                    "feature_version": "research_features_v1"}
+                    "feature_version": feature_set, "mode": mode,
+                    "point_in_time": mode == "strict_pit",
+                    "limitations": result["limitations"],
+                    "training_up_prior": float(parts["train"].up.mean())}
         with threadpool_limits(limits=num_threads):
           model = GradientBoostingModel.train(
             parts["train"][feature_columns], parts["train"]["return"],
@@ -220,7 +316,8 @@ def train(store, *, bars=None, index=None, industries=None, dataset_dir=None,
         }
         result["splits"][str(horizon)] = {
           name: {"n": len(part), "max_target": part.target_date.max().date().isoformat(),
-                 "min_origin": part.origin.min().date().isoformat()}
+                 "min_origin": part.origin.min().date().isoformat(),
+                 "origins": int(part.origin.nunique()), "tickers": int(part.ticker.nunique())}
           for name, part in parts.items()
         }
         candidate = stage / str(horizon)
@@ -241,7 +338,7 @@ def train(store, *, bars=None, index=None, industries=None, dataset_dir=None,
         {"kind": "training_report", "dataset_ids": dataset["ids"], "status": "research"},
       )
       current = feature_frame.loc[feature_frame.origin == feature_frame.origin.max()]
-      for schema in {row[3] for row in trained_models}:
+      for schema in ({row[3] for row in trained_models} if mode == "strict_pit" else set()):
         for _, row in current.iterrows():
           store.save_snapshot(pd.DataFrame([row[feature_columns].to_dict()]), {
             "kind": "features", "ticker": row.ticker, "origin": row.origin.date().isoformat(),
@@ -337,6 +434,9 @@ def main(argv=None):
   parser.add_argument("operation", choices=["train", "fit-garch"])
   parser.add_argument("--root", required=True)
   parser.add_argument("--candidate-only", action="store_true")
+  parser.add_argument("--mode", choices=["strict_pit", "historical_research"], default="strict_pit")
+  parser.add_argument("--feature-set", choices=["research_features_v1", "price_index_v1"],
+                      default="research_features_v1")
   for name in ("bars", "index", "industries", "dataset-dir", "train-end", "validation-end",
                "calibration-end", "test-end", "ticker", "snapshot-id", "origin"):
     parser.add_argument("--" + name)

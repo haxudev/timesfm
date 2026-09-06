@@ -43,6 +43,38 @@ def test_missing_fields_are_disclosed_not_manufactured():
   assert pd.isna(result.frame.iloc[0]["amount"])
 
 
+def test_normalization_retains_rejected_sdk_rows_and_observation_semantics():
+  raw = pd.DataFrame({
+    "date": ["2026-09-03", "2026-09-04"], "open": [10, 10],
+    "high": [12, 12], "low": [9, 9], "close": [-1, 11],
+    "volume": [1000, 1000], "amount": [10000, 11000], "vendor_field": ["A", "B"],
+  })
+  result = providers().normalize_bars(raw, "600519.SS", "qfq", "2026-09-05T10:00:00+00:00")
+  pd.testing.assert_frame_equal(result.raw_frame, raw)
+  assert len(result.frame) == 1
+  assert result.metadata["known_at_semantics"] == "first_observed_timestamp"
+  assert result.frame["published_at"].isna().all()
+  assert result.metadata["provider_version"]
+
+
+def test_provider_subprocess_transports_original_rows(monkeypatch):
+  payload = {"rows": [{"ticker": "600519.SS"}], "metadata": {},
+             "raw_rows": [{"symbol": "600519", "extra": "original"}]}
+  monkeypatch.setattr(providers(), "run_process", lambda *args: json.dumps(payload).encode())
+  result = providers().ResearchProvider().fetch("universe")
+  assert result.raw_frame.to_dict("records") == payload["raw_rows"]
+
+
+def test_zero_activity_rows_are_retained_but_disclosed():
+  result = providers().normalize_bars(pd.DataFrame({
+    "date": ["2026-09-04"], "open": [10], "close": [10], "high": [10], "low": [10],
+    "volume": [0], "amount": [0],
+  }), "600519.SS", "raw", "2026-09-05T10:00:00+00:00")
+  assert len(result.frame) == 1
+  assert result.metadata["non_trading_rows"] == 1
+  assert result.metadata["failed"] == 0
+
+
 def test_real_process_timeout_and_bounded_bytes():
   module = providers()
   start = time.monotonic()

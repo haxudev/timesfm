@@ -69,6 +69,47 @@ def test_probe_defaults_to_two_stocks_and_two_indices(tmp_path):
   assert "incomplete_ohlcv_amount" in result["blockers"]
 
 
+def test_non_trading_collection_rows_are_not_eligible(tmp_path):
+  class InactiveProvider(FixtureProvider):
+    def fetch(self, operation, **kwargs):
+      result = super().fetch(operation, **kwargs)
+      if operation == "bars":
+        result.metadata.update(non_trading_rows=1, missing_fields=[])
+      return result
+
+  report = pipeline().ResearchPipeline(ResearchStore(tmp_path), InactiveProvider(1), rate_seconds=0).bootstrap(
+    limit=1, index_limit=0,
+  )
+  assert report["succeeded"] == 1
+  assert report["eligible"] == 0
+  assert report["non_trading_rows"] == 2
+
+
+def test_collection_keeps_raw_revisions_and_earliest_observation(tmp_path):
+  from stock_forecaster.research.providers import normalize_universe
+
+  class OriginalProvider:
+    def __init__(self):
+      self.day = 4
+
+    def fetch(self, operation, **kwargs):
+      self.day += 1
+      return normalize_universe(pd.DataFrame({"code": ["600519"], "name": ["A"]}),
+                                f"2026-09-{self.day:02d}T10:00:00+00:00")
+
+  store = ResearchStore(tmp_path)
+  runner = pipeline().ResearchPipeline(store, OriginalProvider(), rate_seconds=0)
+  first = runner._fetch("universe")
+  second = runner._fetch("universe")
+  assert first.metadata["raw_snapshot_id"] != second.metadata["raw_snapshot_id"]
+  metadata = store.snapshot_metadata(second.metadata["raw_snapshot_id"])
+  assert metadata["first_seen_at"] == "2026-09-05T10:00:00+00:00"
+  assert metadata["observed_at"] == "2026-09-06T10:00:00+00:00"
+  assert metadata["published_at"] is None
+  assert store.read_snapshot(first.metadata["raw_snapshot_id"]).columns.tolist() == ["code", "name"]
+  assert first.metadata["point_in_time"] is False
+
+
 def evaluation_fixture(store, issued="2026-09-02T10:00:00+00:00"):
   frozen = store.save_snapshot(pd.DataFrame({"date": ["2026-09-01", "2026-09-02"],
                                              "price": [99., 100.]}), {

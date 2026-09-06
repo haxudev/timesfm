@@ -9,6 +9,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from importlib.metadata import version
 
 import pandas as pd
 
@@ -17,6 +18,9 @@ MAX_BYTES = 16 * 1024 * 1024
 ERROR_CODES = {
   "provider_timeout", "provider_transient", "provider_failed",
   "response_too_large", "invalid_response", "invalid_operation", "invalid_bars",
+  "tushare_not_configured", "tushare_auth_failed", "tushare_permission_denied",
+  "tushare_rate_limited", "tushare_response_truncated", "invalid_adjustment_factors",
+  "provider_symbol_unsupported", "provider_dependency_missing",
 }
 
 
@@ -28,6 +32,7 @@ class ProviderError(ValueError):
 class ProviderResult:
   frame: pd.DataFrame
   metadata: dict
+  raw_frame: pd.DataFrame | None = None
 
 
 def run_process(command: list[str], timeout: float, max_bytes: int) -> bytes:
@@ -74,19 +79,24 @@ def run_process(command: list[str], timeout: float, max_bytes: int) -> bytes:
 
 
 class ResearchProvider:
-  def __init__(self, *, timeout: float = 45, attempts: int = 3, backoff: float = .5):
+  def __init__(self, *, timeout: float = 45, attempts: int = 3, backoff: float = .5, provider="akshare"):
     if not 0 < timeout <= 45 or not 1 <= attempts <= 3 or not 0 <= backoff <= 5:
       raise ValueError("invalid_provider_budget")
     self.timeout, self.attempts, self.backoff = timeout, attempts, backoff
+    if provider not in {"akshare", "tushare", "baostock"}:
+      raise ProviderError("invalid_operation")
+    self.name = provider
 
   def fetch(self, operation: str, **kwargs) -> ProviderResult:
-    if operation not in {"universe", "bars", "industry"}:
+    if operation not in {"universe", "bars", "industry", "securities", "calendar", "factors"}:
       raise ProviderError("invalid_operation")
     command = [sys.executable, "-m", __name__, operation]
     for key, value in kwargs.items():
-      if key not in {"ticker", "start", "end", "adjustment"}:
+      if key not in {"ticker", "start", "end", "adjustment", "status"}:
         raise ProviderError("invalid_operation")
       command.extend(["--" + key, str(value)])
+    if self.name != "akshare":
+      command.extend(["--provider", self.name])
     deadline = time.monotonic() + self.timeout
     for attempt in range(self.attempts):
       remaining = deadline - time.monotonic()
@@ -103,7 +113,11 @@ class ResearchProvider:
           payload.get("metadata"), dict
         ):
           raise ProviderError("invalid_response")
-        return ProviderResult(pd.DataFrame(payload["rows"]), payload["metadata"])
+        original = payload.get("raw_rows")
+        if original is not None and not isinstance(original, list):
+          raise ProviderError("invalid_response")
+        return ProviderResult(pd.DataFrame(payload["rows"]), payload["metadata"],
+                              pd.DataFrame(original) if original is not None else None)
       except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as error:
         raise ProviderError("invalid_response") from error
       except ProviderError as error:
@@ -127,8 +141,10 @@ def _ticker(code) -> str:
 
 
 def _metadata(kind: str, fetched_at: str) -> dict:
-  return {"kind": kind, "provider": "akshare", "provider_version": "1.18.94",
+  return {"kind": kind, "provider": "akshare", "provider_version": version("akshare"),
           "fetched_at": fetched_at, "known_at": fetched_at,
+          "observed_at": fetched_at, "published_at": None,
+          "known_at_semantics": "first_observed_timestamp",
           "point_in_time": False, "trusted": False, "schema_version": 1}
 
 
@@ -152,7 +168,7 @@ def normalize_universe(frame: pd.DataFrame, fetched_at: str) -> ProviderResult:
     **_metadata("universe", fetched_at), "source": "stock_info_a_code_name",
     "coverage": "current_universe_only", "requested": len(frame),
     "failed": errors + duplicates, "blockers": ["historical_universe_unverified"],
-  })
+  }, frame.copy(deep=True))
 
 
 def normalize_bars(frame, ticker: str, adjustment: str, fetched_at: str) -> ProviderResult:
@@ -162,6 +178,7 @@ def normalize_bars(frame, ticker: str, adjustment: str, fetched_at: str) -> Prov
   ticker = normalize_ticker(ticker)
   if adjustment not in {"raw", "qfq"} or (index_name(ticker) and adjustment != "raw"):
     raise ProviderError("invalid_operation")
+  original = frame.copy(deep=True)
   frame = frame.copy()
   required = ["open", "high", "low", "close", "volume", "amount"]
   if not {"date", "close"} <= set(frame) or frame.empty:
@@ -188,15 +205,17 @@ def normalize_bars(frame, ticker: str, adjustment: str, fetched_at: str) -> Prov
   frame["source"] = "akshare:stock_zh_a_hist_tx"
   frame["fetched_at"] = fetched_at
   frame["known_at"] = fetched_at
+  frame["published_at"] = None
   return ProviderResult(frame.reset_index(drop=True), {
     **_metadata("bars", fetched_at), "source": "akshare:stock_zh_a_hist_tx",
     "ticker": ticker, "instrument_type": "index" if index_name(ticker) else "stock",
     "adjustment": adjustment, "missing_fields": missing, "failed": failed,
+    "non_trading_rows": int((frame.volume.eq(0) | frame.amount.eq(0)).sum()),
     "currency": "CNY", "volume_unit": "shares", "amount_unit": "CNY",
     "unit_evidence": "installed_stock_zh_a_hist_tx_normalization",
     "blockers": ["historical_price_vintage_unverified"]
       + (["incomplete_ohlcv_amount"] if missing else []),
-  })
+  }, original)
 
 
 def normalize_industry(frame: pd.DataFrame, fetched_at: str) -> ProviderResult:
@@ -218,10 +237,21 @@ def normalize_industry(frame: pd.DataFrame, fetched_at: str) -> ProviderResult:
     **_metadata("industry", fetched_at), "source": "stock_industry_clf_hist_sw",
     "failed": int((normalized.ticker.isna() | normalized.effective_from.isna()).sum()),
     "blockers": [INDUSTRY_BLOCKER],
-  })
+  }, frame.copy(deep=True))
 
 
 def download(operation: str, **kwargs) -> ProviderResult:
+  provider = kwargs.pop("provider", "akshare")
+  if provider == "tushare":
+    from .tushare import download as fetch_tushare
+
+    return fetch_tushare(operation, **kwargs)
+  if provider == "baostock":
+    from .baostock_provider import download as fetch_baostock
+
+    return fetch_baostock(operation, **kwargs)
+  if operation not in {"universe", "bars", "industry"}:
+    raise ProviderError("invalid_operation")
   import akshare as ak
 
   fetched_at = datetime.now(timezone.utc).isoformat()
@@ -243,7 +273,9 @@ def download(operation: str, **kwargs) -> ProviderResult:
 
 def main(argv=None) -> int:
   parser = argparse.ArgumentParser()
-  parser.add_argument("operation", choices=["universe", "bars", "industry"])
+  parser.add_argument("operation", choices=["universe", "bars", "industry", "securities", "calendar", "factors"])
+  parser.add_argument("--provider", choices=["akshare", "tushare", "baostock"], default="akshare")
+  parser.add_argument("--status", choices=["L", "D", "P"], default="L")
   parser.add_argument("--ticker")
   parser.add_argument("--start")
   parser.add_argument("--end")
@@ -254,6 +286,8 @@ def main(argv=None) -> int:
     with contextlib.redirect_stdout(io.StringIO()):
       result = download(operation, **args)
     output = json.dumps({"rows": json.loads(result.frame.to_json(orient="records", date_format="iso")),
+                         "raw_rows": (json.loads(result.raw_frame.to_json(orient="records", date_format="iso"))
+                                      if result.raw_frame is not None else None),
                          "metadata": result.metadata}, allow_nan=False)
     if len(output.encode()) > MAX_BYTES:
       raise ProviderError("response_too_large")
@@ -265,7 +299,7 @@ def main(argv=None) -> int:
     transient = isinstance(error, (requests.Timeout, requests.ConnectionError))
     if isinstance(error, requests.HTTPError) and error.response is not None:
       transient = error.response.status_code in {408, 429, 500, 502, 503, 504}
-    code = str(error) if isinstance(error, ProviderError) else (
+    code = str(error) if str(error) in ERROR_CODES else (
       "provider_transient" if transient else "provider_failed")
     print(json.dumps({"error": code if code in ERROR_CODES else "provider_failed"}))
     return 1

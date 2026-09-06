@@ -60,6 +60,7 @@ def build_features(
   origin: date | str,
   *,
   sessions: pd.DatetimeIndex | None = None,
+  feature_set: str = "research_features_v1",
 ) -> pd.DataFrame:
   """Return an ordered feature matrix indexed by ticker (no labels).
 
@@ -83,6 +84,8 @@ def build_features(
   divide current values by the inclusive trailing 20-session mean. amplitude
   = (high-low)/previous_close. Incomplete histories raise, never forward-fill.
   """
+  if feature_set not in {"research_features_v1", "price_index_v1"}:
+    raise ValueError("invalid_feature_set")
   cutoff = pd.Timestamp(origin)
   if pd.isna(cutoff) or cutoff.tz is not None or cutoff != cutoff.normalize():
     raise ValueError("invalid_origin: a timezone-naive session date is required")
@@ -109,7 +112,8 @@ def build_features(
   if not data.date.isin(sessions).all():
     raise ValueError("off_calendar_bars: stock dates outside supplied calendar")
   tickers = pd.Index(sorted(data.ticker.unique()), name="ticker")
-  membership = _memberships(industries, tickers, window, cutoff)
+  membership = (_memberships(industries, tickers, window, cutoff)
+                if feature_set == "research_features_v1" else None)
   matrices = {}
   for field in fields:
     matrix = (
@@ -139,23 +143,26 @@ def build_features(
   close = matrices["close"]
   daily = close.pct_change(fill_method=None).iloc[1:]
   industry_daily = pd.DataFrame(index=daily.index, columns=tickers, dtype=float)
-  for position, session in enumerate(daily.index):
-    groups = membership.iloc[position]
-    means = daily.loc[session].groupby(groups).mean()
-    industry_daily.loc[session] = groups.map(means)
+  if membership is not None:
+    for position, session in enumerate(daily.index):
+      groups = membership.iloc[position]
+      means = daily.loc[session].groupby(groups).mean()
+      industry_daily.loc[session] = groups.map(means)
   result = pd.DataFrame(index=tickers)
-  result["industry"] = membership.iloc[-1].astype("category")
+  if membership is not None:
+    result["industry"] = membership.iloc[-1].astype("category")
   for horizon in (1, 5, 20):
     result[f"momentum_{horizon}"] = close.iloc[-1] / close.iloc[-horizon - 1] - 1
     result[f"index_momentum_{horizon}"] = (
       benchmark_close.iloc[-1] / benchmark_close.iloc[-horizon - 1] - 1
     )
-    result[f"industry_momentum_{horizon}"] = (
-      1 + industry_daily.iloc[-horizon:]
-    ).prod() - 1
-    result[f"industry_relative_{horizon}"] = (
-      result[f"momentum_{horizon}"] - result[f"industry_momentum_{horizon}"]
-    )
+    if membership is not None:
+      result[f"industry_momentum_{horizon}"] = (
+        1 + industry_daily.iloc[-horizon:]
+      ).prod() - 1
+      result[f"industry_relative_{horizon}"] = (
+        result[f"momentum_{horizon}"] - result[f"industry_momentum_{horizon}"]
+      )
   log_returns = np.log(close).diff().iloc[1:]
   for horizon in (5, 20):
     result[f"volatility_{horizon}"] = log_returns.iloc[-horizon:].std(ddof=1)

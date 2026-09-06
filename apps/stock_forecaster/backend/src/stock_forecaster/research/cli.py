@@ -56,6 +56,8 @@ def main(argv=None):
     command.add_argument("--limit", type=int, default=2 if name == "probe" else None)
     command.add_argument("--index-limit", type=int, default=2 if name == "probe" else 6)
     command.add_argument("--rate-seconds", type=float, default=.25)
+    if name != "daily":
+      command.add_argument("--provider", choices=["akshare", "tushare", "baostock"], default="akshare")
     if name != "probe":
       command.add_argument("--batch-size", type=int, default=100)
     if name != "daily":
@@ -74,6 +76,15 @@ def main(argv=None):
                              help="Maximum startup stock collections when a saved universe exists; empty stores need --limit")
   score_parser = commands.add_parser("score", help="Evaluate matured frozen predictions using persisted bars only")
   score_parser.add_argument("--as-of")
+  access = commands.add_parser("tushare-access", help="Check existing Tushare API permissions without buying access")
+  access.add_argument("--end")
+  source = commands.add_parser("source-fetch", help="Persist one explicitly chosen data-source response")
+  source.add_argument("operation", choices=["universe", "bars", "industry", "securities", "calendar", "factors"])
+  source.add_argument("--provider", choices=["akshare", "tushare", "baostock"], required=True)
+  for name in ("ticker", "start", "end"):
+    source.add_argument("--" + name)
+  source.add_argument("--adjustment", choices=["raw", "qfq"], default="raw")
+  source.add_argument("--status", choices=["L", "D", "P"], default="L")
   train_parser = commands.add_parser("train", help="Offline verified-dataset training; never trust free history implicitly")
   for name in ("bars", "index", "industries", "dataset-dir", "train-end", "validation-end", "calibration-end", "test-end"):
     train_parser.add_argument("--" + name)
@@ -83,6 +94,21 @@ def main(argv=None):
   train_parser.add_argument("--max-bytes", type=int, default=512 * 1024 * 1024)
   train_parser.add_argument("--timeout", type=int, default=3600)
   train_parser.add_argument("--candidate-only", action="store_true")
+  train_parser.add_argument("--dataset", help="Immutable prepared dataset snapshot ID")
+  train_parser.add_argument("--mode", choices=["strict_pit", "historical_research"], default="strict_pit")
+  train_parser.add_argument("--feature-set", choices=["research_features_v1", "price_index_v1"],
+                            default="research_features_v1")
+  prepare = commands.add_parser("prepare-dataset", help="Assemble one collection into a candidate research dataset")
+  prepare.add_argument("--collection-report", required=True)
+  prepare.add_argument("--benchmark", default="000300.SS")
+  prepare.add_argument("--max-rows", type=int, default=250000)
+  prepare.add_argument("--max-bytes", type=int, default=512 * 1024 * 1024)
+  readiness = commands.add_parser("readiness", help="Assess coverage and purged label counts without training")
+  readiness.add_argument("--dataset", required=True)
+  for name in ("train-end", "validation-end", "calibration-end", "test-end"):
+    readiness.add_argument("--" + name)
+  readiness.add_argument("--max-rows", type=int, default=250000)
+  readiness.add_argument("--max-bytes", type=int, default=512 * 1024 * 1024)
   commands.add_parser("run-once", help="Recover stale leases and execute at most one job")
   fit = commands.add_parser("fit-garch", help="Explicitly fit a new GARCH artifact; existing artifacts are refused")
   fit.add_argument("ticker")
@@ -100,16 +126,49 @@ def main(argv=None):
     store = ResearchStore(arguments.root or settings.research_data_dir)
     if arguments.command in {"probe", "bootstrap", "score"}:
       from .pipeline import ResearchPipeline
+      from .providers import ResearchProvider
 
-      runner = ResearchPipeline(store, rate_seconds=getattr(arguments, "rate_seconds", .25))
+      runner = ResearchPipeline(store, ResearchProvider(provider=getattr(arguments, "provider", "akshare")),
+                                rate_seconds=getattr(arguments, "rate_seconds", .25))
       options = {key: value for key, value in vars(arguments).items()
-                 if key not in {"command", "root", "rate_seconds"}}
+                 if key not in {"command", "root", "rate_seconds", "provider"}}
       result = getattr(runner, arguments.command)(**options)
+    elif arguments.command == "tushare-access":
+      from .tushare import probe_access
+
+      result = probe_access(store, end=arguments.end)
+    elif arguments.command == "source-fetch":
+      from .pipeline import ResearchPipeline
+      from .providers import ResearchProvider
+
+      runner = ResearchPipeline(store, ResearchProvider(provider=arguments.provider), rate_seconds=1.3)
+      options = {key: value for key, value in vars(arguments).items()
+                 if key not in {"command", "root", "provider", "operation"} and value is not None}
+      fetched = runner._fetch(arguments.operation, **options)
+      identifier = store.save_snapshot(fetched.frame, fetched.metadata)
+      result = {"snapshot_id": identifier, "provider": arguments.provider, "operation": arguments.operation,
+                "rows": len(fetched.frame), "raw_snapshot_id": fetched.metadata.get("raw_snapshot_id"),
+                "point_in_time": False, "blockers": fetched.metadata.get("blockers", [])}
+    elif arguments.command in {"prepare-dataset", "readiness"}:
+      from .datasets import assemble_dataset, assess_dataset, dataset_options
+
+      options = {key: value for key, value in vars(arguments).items()
+                 if key not in {"command", "root", "dataset"}}
+      if arguments.command == "prepare-dataset":
+        result = assemble_dataset(store, **options)
+      else:
+        result = assess_dataset(store, **dataset_options(store, arguments.dataset), **options)
     elif arguments.command == "train":
       from .training import run_training
 
       options = {key: value for key, value in vars(arguments).items()
-                 if key not in {"command", "root", "candidate_only"}}
+                 if key not in {"command", "root", "candidate_only", "dataset"}}
+      if arguments.dataset:
+        from .datasets import dataset_options
+
+        if any(options.get(name) is not None for name in ("bars", "index", "industries", "dataset_dir")):
+          raise ValueError("invalid_dataset_manifest")
+        options.update(dataset_options(store, arguments.dataset))
       result = run_training(store, "train", **options, activate=not arguments.candidate_only)
     elif arguments.command == "backup":
       result = {"path": str(store.backup(arguments.destination)), "scope": "jobs_snapshots_and_native_models"}

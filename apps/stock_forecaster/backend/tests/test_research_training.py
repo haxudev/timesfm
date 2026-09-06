@@ -108,6 +108,73 @@ def test_budget_failure_does_not_publish_partial_models(tmp_path):
   assert not (tmp_path / "models" / "lightgbm").exists()
 
 
+def test_strict_dataset_rejects_inactive_target_prices(tmp_path):
+  store = ResearchStore(tmp_path)
+  identifiers, sessions = verified_dataset(store)
+  frame = store.read_snapshot(identifiers["bars"])
+  frame.loc[frame.date == sessions[-1], "volume"] = 0
+  identifiers["bars"] = store.save_snapshot(frame, store.snapshot_metadata(identifiers["bars"]))
+  dataset = training().load_dataset(store, **identifiers)
+  with pytest.raises(ValueError, match="invalid_bars"):
+    training().prepare_training_data(dataset)
+
+
+def backfilled_dataset(store):
+  identifiers, sessions = verified_dataset(store)
+  for name in ("bars", "index"):
+    frame = store.read_snapshot(identifiers[name])
+    frame["known_at"] = "2026-09-05T08:00:00+00:00"
+    identifiers[name] = store.save_snapshot(frame, {
+      "kind": name, "source": "synthetic-backfill", "trusted": False,
+      "point_in_time": False, "adjustment": "qfq" if name == "bars" else "raw",
+      "fetched_at": "2026-09-05T08:00:00+00:00",
+      "blockers": ["historical_price_vintage_unverified"],
+    })
+  identifiers.pop("industries")
+  return identifiers, sessions
+
+
+def test_backfill_mode_preserves_untrusted_evidence_and_requires_separate_spec(tmp_path):
+  store = ResearchStore(tmp_path)
+  identifiers, _ = backfilled_dataset(store)
+  dataset = training().load_dataset(store, **identifiers, mode="historical_research",
+                                    feature_set="price_index_v1")
+  assert dataset["mode"] == "historical_research"
+  assert dataset["industries"] is None
+  assert "historical_price_vintage_unverified" in dataset["limitations"]
+  assert not store.snapshot_metadata(identifiers["bars"])["trusted"]
+  assert dataset["bars"].known_at.min() > dataset["bars"].date.max()
+  with pytest.raises(ValueError, match="historical_industry_publication_unverified"):
+    training().load_dataset(store, **identifiers)
+  with pytest.raises(ValueError, match="research_feature_set_required"):
+    training().load_dataset(store, **identifiers, mode="historical_research")
+
+
+def test_backfill_cannot_activate_or_emit_trusted_inference_features(tmp_path):
+  store = ResearchStore(tmp_path)
+  identifiers, sessions = backfilled_dataset(store)
+  arguments = {**identifiers, **bounds(sessions), "mode": "historical_research",
+               "feature_set": "price_index_v1", "n_estimators": 3, "num_threads": 1}
+  with pytest.raises(ValueError, match="historical_research_candidate_only"):
+    training().train(store, **arguments)
+  result = training().run_training(store, "train", **arguments, activate=False)
+  assert result["activated"] is False
+  assert result["mode"] == "historical_research"
+  assert result["feature_set"] == "price_index_v1"
+  assert set(result["artifacts"]) == {"1", "5", "20"}
+  assert "historical_price_vintage_unverified" in result["limitations"]
+  assert not (tmp_path / "models" / "lightgbm").exists()
+  pipeline = importlib.import_module("stock_forecaster.research.pipeline")
+  assert not list(pipeline.snapshots(store, "features"))
+  from stock_forecaster.research.gradient_boosting import GradientBoostingModel
+
+  for identifier in result["artifacts"].values():
+    model = GradientBoostingModel.load(tmp_path / "models" / "artifacts" / identifier)
+    assert model.metadata["feature_version"] == "price_index_v1"
+    assert model.metadata["point_in_time"] is False
+    assert "industry" not in model.feature_columns
+
+
 def test_dataset_directory_requires_registered_matching_snapshots(tmp_path):
   store = ResearchStore(tmp_path / "store")
   directory = tmp_path / "dataset"

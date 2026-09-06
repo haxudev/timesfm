@@ -2,10 +2,13 @@
 
 ## Prediction Research Workspace
 
-The default screen is now a single-stock prediction workflow: select a stock,
-choose 1/5/20 exchange sessions, and request a persisted prediction. It displays
-return, calibrated upside probability, and independent cumulative volatility.
-The previous v1 forecast/backtest UI remains under Advanced Research.
+The default screen is market viewing, first in the **User Viewing** navigation
+group. The adjacent stock-prediction page supports 1/5/20 exchange sessions and
+persisted forecasts, displaying available returns, calibrated upside probability
+and independent cumulative volatility. **Research Management** contains independent
+forecast-experiment, historical-backtest, model-evaluation and data-status pages.
+The old monolithic Advanced Research UI has been replaced by dedicated pages;
+the underlying v1 forecast/backtest APIs remain unchanged.
 
 - TimesFM provides a cumulative return path, not a calibrated joint price band.
 - The official checkpoint is pinned to revision
@@ -56,7 +59,58 @@ The WSL host must be running; `restart: unless-stopped` cannot run a powered-off
 Weekly training requires an explicitly configured, reviewed dataset. It produces
 research candidates, not automatically validated replacements.
 
-### Research Commands
+### Free Data Sources
+
+Supported research sources are **AKShare**, **Tushare**, and **BaoStock**. AKShare
+remains the default; source selection is explicit and no provider failure silently
+switches the price basis. No data subscription or quota purchase is performed.
+
+For Tushare, place `tushare_api_key=YOUR_KEY` in the repository-root `.env`, or set
+`TUSHARE_API_KEY` / `STOCK_FORECASTER_TUSHARE_API_KEY` in the backend environment.
+Run the commands below from the repository root so the relative `.env` is loaded.
+The key is a backend `SecretStr`, excluded from settings serialization/repr, Git
+and Docker build contexts. Do not use a `VITE_` variable or put a key in CLI arguments.
+Docker containers need an explicit runtime environment configuration and updated
+image to use new adapters; the running prediction containers were not changed.
+
+```sh
+python -m stock_forecaster.research.cli --root .local/tushare-check tushare-access
+python -m stock_forecaster.research.cli --root .local/tushare-data probe --provider tushare --limit 2 --index-limit 2 --rate-seconds 2
+python -m stock_forecaster.research.cli --root .local/baostock-data probe --provider baostock --limit 2 --index-limit 2
+python -m stock_forecaster.research.cli --root .local/tushare-data source-fetch bars --provider tushare --ticker 600519.SS --start 2026-08-03 --end 2026-09-04 --adjustment qfq
+python -m stock_forecaster.research.cli --root .local/baostock-data source-fetch industry --provider baostock --ticker 002594.SZ --end 2020-01-06
+```
+
+`probe`/`bootstrap` use a provider's stock universe; a denied or rate-limited universe
+request stops that batch and persists the failure. `source-fetch` can separately
+request `bars`, `factors`, `calendar`, `securities`, `industry` or `universe` where
+the selected provider implements it; `--status D` selects Tushare delisted securities.
+Inspect actual permissions first. Do not repeatedly run examples after a quota error.
+`tushare-access` returns a report, so command completion is not proof all checks passed.
+Quota/auth/permission errors are distinct and not automatically retried.
+
+Tushare uses official HTTPS POST with fixed destination, no redirects and bounded
+responses. Daily volume is converted from hands to shares, amount from thousands
+of CNY to CNY. Local qfq uses each day's positive factor divided by the last requested
+bar's factor; missing/duplicate/mismatched factors are refused. Original daily and
+factor rows are retained with record types. This is a current-response vintage,
+not a reconstructed historical PIT price archive. Truncation at a documented row
+limit is rejected; this adapter does not claim unlimited automatic pagination.
+
+BaoStock uses its official SDK in the same bounded subprocess mechanism. Its
+return-based qfq convention is explicitly recorded and must not be spliced with
+Tushare/AKShare qfq. Suspension fill prices are excluded from normalized bars while
+original rows and ST/status fields remain in raw snapshots. Current adapter coverage
+is verified SH/SZ only; Beijing routes fail explicitly. Dated industry queries retain
+the vendor's classification and update date, not fabricated effective/publication times.
+
+As of 2026-09-06, Tushare sample prices/factors/index/calendar/listed data returned,
+but later calls were rate-limited and SW industry calls lacked permission. BaoStock
+completed the short stock/index probe. See [the measured source report](../../docs/research/2026-09-06-free-data-sources.md).
+Web **data status** shows per-source collections and earlier capability checks
+separately. Existing trained candidates remain unapproved and use their original data.
+
+### Existing Research Commands
 
 Use the same Compose project/port options as at startup. These operations are
 explicit and may access data sources; normal unit tests do not.
@@ -90,6 +144,128 @@ implements one explicit chronological fold with label-end purging and independen
 sigmoid calibration; it marks results `research`, not `validated`. Three-fold
 promotion evidence, full-market throughput and automatic champion replacement
 are not claimed. Published feature snapshots must match the inference price basis.
+
+### Historical Research And Data Readiness
+
+Free-source backfills can now enter a separately identified `price_index_v1`
+experiment, never the default industry/PIT specification. This mode requires
+`--mode historical_research --feature-set price_index_v1 --candidate-only`.
+It refuses activation and does not emit trusted online feature snapshots.
+Source trust flags remain unchanged. A successful experiment is not a PIT backtest.
+
+Run from the repository root using the backend's installed Python environment:
+
+```sh
+python -m stock_forecaster.research.cli --root .local/research-experiment bootstrap --limit 30 --index-limit 4 --start 2021-09-01 --end 2026-09-04
+python -m stock_forecaster.research.cli --root .local/research-experiment prepare-dataset --collection-report COLLECTION_REPORT_ID --benchmark 000300.SS
+python -m stock_forecaster.research.cli --root .local/research-experiment readiness --dataset DATASET_ID
+python -m stock_forecaster.research.cli --root .local/research-experiment train --dataset DATASET_ID --mode historical_research --feature-set price_index_v1 --candidate-only --train-end 2024-06-06 --validation-end 2025-03-10 --calibration-end 2025-12-04 --test-end 2026-09-04
+```
+
+Use IDs returned by each preceding command and `split_ends` from the readiness
+report, or provide all four chronological ends explicitly. The defaults allocate
+55/15/15/15 percent of sessions before label-end purging; this is an experiment
+split, not statistical validation. The loader and readiness command retain the
+250,000-row and 512 MiB data guards; they are not process RSS limits.
+
+Readiness checks complete 21-session feature windows, explicit-calendar labels,
+purged partition sizes and up/non-up counts. Missing or zero-activity stock bars
+invalidate affected windows and labels, never forward-fill. Strict training
+rejects invalid full bars. TimesFM/GARCH context counts check positive close and
+available activity fields separately from OHLC features; they indicate input
+eligibility, not successful model fitting or prediction quality. Read the JSON
+`ready` flags: a successfully generated report can still contain blockers.
+
+Successful provider calls retain the original SDK DataFrame as `provider_response`
+snapshots, including rows rejected during normalization. These are not HTTP wire
+responses. Content/request hashes preserve the earliest local observation of an
+identical payload; each retrieval also records observation and ingestion time.
+Unknown publication timestamps remain null. This is payload-level revision
+tracking, not a reconstructed historical publication archive or a per-row change log.
+
+On 2026-09-05 a bounded real run trained all six LightGBM heads on 35,589 feature
+rows, but return MAE did not beat the zero-return baseline at any horizon. The
+sample is the first 30 current SZ symbols, not a representative/full-market PIT
+universe. A GARCH candidate also fitted successfully; no candidate was activated.
+See [the measured readiness report](../../docs/research/2026-09-05-data-readiness.md)
+for exact snapshot IDs, metrics and limitations. Existing containers must be rebuilt
+explicitly to gain these commands; this verification used local Python and did not
+restart services, enable schedules, buy data or add dependencies.
+
+### Local Research Web Preview
+
+The workspace has two audience groups and six separate pages:
+
+| Group | Pages |
+| --- | --- |
+| User Viewing | Market quotes (first/default), stock prediction |
+| Research Management | Forecast experiment, historical backtest, model evaluation, data status |
+
+Desktop displays the two sidebar groups. Narrow screens use a workspace selector
+and only that group's bottom navigation, outside the scrolling content. Only one
+page is visible. Market quotes are no longer nested inside research. Forecast
+experiments and backtests have separate state, compact parameter/result layouts,
+and explicit run commands. Forecast charts and detail rows switch locally instead
+of stacking three charts; CSV export uses the retained response.
+
+Views mount on first visit and retain their state during navigation. Market and
+stock-prediction pages share the selected security. Forecast and backtest pages
+retain their own parameters and results independently, along with in-flight work.
+Results identify the submitted parameters and warn when the form has since changed.
+Hidden quote/health polling pauses; submitted prediction jobs can still finish.
+Hash links (`#market`, `#prediction`, `#forecast`, `#backtest`, `#models`, `#data`)
+support direct links and browser back/forward; old `#research` links normalize to
+`#forecast` without adding a history entry. State retention is within the current page session, not a
+promise to persist unsaved parameters across browser reloads.
+
+These groups are information architecture, not authentication or authorization.
+No administrator login or privilege enforcement is claimed. See
+[the audience and authorization design](../../docs/research/2026-09-06-audience-design.md)
+for the planned user/researcher/administrator boundaries.
+
+`GET /api/v2/evidence` returns allowlisted, offline summaries; it never collects,
+trains, loads a model or creates a task. Training and readiness reports must refer
+to the same dataset IDs. The latest source probe is displayed separately; missing
+source or matching readiness evidence produces a partial response, not approval.
+`production_ready` remains false even when all report types are available.
+
+For an isolated preview that leaves the existing 5174/8012 containers unchanged,
+use the installed backend Python environment from the repository root:
+
+```sh
+python -m stock_forecaster.research.preview seed --root .local/web-preview-new --source .local/data-readiness-20260905 --source .local/source-check-20260906
+python -m stock_forecaster.research.preview serve --root .local/web-preview-new --port 8013 --web-port 5175
+```
+
+In another terminal:
+
+```sh
+npm --prefix apps/stock_forecaster/frontend run --silent dev -- --host 127.0.0.1 --port 5175 --strictPort --mode research-preview
+```
+
+Open `http://127.0.0.1:5175/` and select **data status** or **model evaluation** in
+the navigation. Data coverage and source checks are separate from candidate metrics.
+The latest three-source instance uses `.local/web-preview-free-sources-20260906`;
+the prior four-report snapshot remains `.local/web-preview-20260906-verified`. `seed` requires
+a new destination and refuses to overwrite one. It copies only report snapshots,
+preserving their hashes and original timestamps; it does not copy raw provider
+frames, jobs or model directories. Known sensitive field names/credential strings
+are rejected, but this is a guard, not comprehensive secret detection. Inspect
+reports before sharing local files. The HTTP response always uses a field allowlist.
+
+The preview backend binds only to 127.0.0.1 and registers GET health/evidence
+endpoints only. The frontend uses a same-origin Vite proxy: evidence to 8013,
+other `/api` requests to existing 8012. Predictions still use the existing worker
+and model state. The preview does not promote experimental LightGBM artifacts.
+In other environments `VITE_EVIDENCE_API_BASE_URL` can override the default common
+API origin; configure CORS there explicitly.
+
+`research-preview` is a development-server mode, not a production reverse proxy.
+Do not expose Vite or the existing unauthenticated research APIs publicly. The
+source/report snapshot is static until explicitly reseeded into a new preview
+directory. Windows/WSL and both terminals must stay running for this preview;
+automatic startup, authentication and TLS are not installed by these commands.
+See [the release decision and staged plan](../../docs/research/2026-09-06-web-release.md).
 
 Backup to a mounted directory on another disk, outside `/data`:
 

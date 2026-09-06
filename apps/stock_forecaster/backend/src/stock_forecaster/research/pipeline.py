@@ -98,7 +98,29 @@ class ResearchPipeline:
 
   def _fetch(self, operation, **kwargs):
     try:
-      return self.provider.fetch(operation, **kwargs)
+      result = self.provider.fetch(operation, **kwargs)
+      if result.raw_frame is not None:
+        observed = result.metadata["fetched_at"]
+        content_digest = digest({
+          "source": result.metadata.get("source"), "operation": operation, "request": kwargs,
+          "columns": result.raw_frame.columns.tolist(),
+          "rows": json.loads(result.raw_frame.to_json(orient="records", date_format="iso")),
+        })
+        previous = [metadata["first_seen_at"] for _, metadata in snapshots(self.store, "provider_response")
+                    if metadata.get("content_digest") == content_digest]
+        first_seen = min([observed, *previous], key=pd.Timestamp)
+        identifier = self.store.save_snapshot(result.raw_frame, {
+          **result.metadata, "kind": "provider_response", "operation": operation,
+          "request": kwargs, "content_digest": content_digest,
+          "payload_format": "sdk_dataframe_not_http_body",
+          "first_seen_at": first_seen, "observed_at": observed,
+          "ingested_at": self.clock().isoformat(), "published_at": None,
+        })
+        result.metadata = {**result.metadata, "raw_snapshot_id": identifier,
+                           "first_seen_at": first_seen, "known_at": first_seen}
+        if "known_at" in result.frame:
+          result.frame["known_at"] = first_seen
+      return result
     finally:
       if self.rate_seconds:
         time.sleep(self.rate_seconds)
@@ -123,16 +145,17 @@ class ResearchPipeline:
     start = start or (pd.Timestamp(end) - pd.DateOffset(years=5)).date().isoformat()
     if pd.Timestamp(start) > pd.Timestamp(end):
       raise ValueError("invalid_date_range")
-    report = {"mode": mode, "as_of": end, "start": start, "requested": 0,
+    report = {"mode": mode, "provider": getattr(self.provider, "name", "akshare"), "as_of": end, "start": start, "requested": 0,
               "succeeded": 0, "failed": 0, "eligible": 0,
-              "eligibility_basis": "complete_downloaded_fields_not_PIT_training_approval",
+              "eligibility_basis": "complete_fields_and_positive_activity_not_PIT_approval",
               "errors": [], "bars_snapshots": [],
               "industry_snapshot": None, "blockers": [INDUSTRY_BLOCKER],
               "partial_universe": limit is not None, "field_coverage": [],
-              "invalid_rows": 0, "source_coverage": {}, "successful_tickers": [],
+              "invalid_rows": 0, "non_trading_rows": 0, "source_coverage": {}, "successful_tickers": [],
               "selection": {"limit": limit, "index_limit": index_limit}, "phase": "collection"}
     try:
-      universe = self._fetch("universe")
+      dated = {"end": end} if getattr(self.provider, "name", "akshare") == "baostock" else {}
+      universe = self._fetch("universe", **dated)
       stocks = universe.frame.ticker.drop_duplicates().tolist()
       report["universe_snapshot"] = self.store.save_snapshot(universe.frame, {
         **universe.metadata, "kind": "universe", "as_of": end,
@@ -142,13 +165,13 @@ class ResearchPipeline:
       return self._finish_collection(report)
     report["universe_total"] = len(stocks)
     report["invalid_rows"] += int(universe.metadata.get("failed", 0))
-    report["source_coverage"]["universe"] = "current_only"
+    report["source_coverage"]["universe"] = universe.metadata.get("coverage", "current_only")
     tickers = stocks[:limit] + list(INDEX_NAMES)[:index_limit]
     report["requested"] = len(tickers)
     report["stock_requested"] = len(stocks[:limit])
     report["index_requested"] = index_limit
     try:
-      industry = self._fetch("industry")
+      industry = self._fetch("industry", **dated)
       report["invalid_rows"] += int(industry.metadata.get("failed", 0))
       report["industry_snapshot"] = self.store.save_snapshot(industry.frame, {
         **industry.metadata, "kind": "industry", "as_of": end,
@@ -173,7 +196,9 @@ class ResearchPipeline:
             report["field_coverage"].append({"ticker": ticker, "adjustment": adjustment,
                                              "missing": missing})
             report["invalid_rows"] += int(result.metadata.get("failed", 0))
-            eligible = eligible and not missing and not result.metadata.get("failed", 0)
+            inactive = int(result.metadata.get("non_trading_rows", 0))
+            report["non_trading_rows"] += inactive
+            eligible = eligible and not missing and not result.metadata.get("failed", 0) and not inactive
             report["blockers"].extend(result.metadata.get("blockers", []))
             if missing:
               report["blockers"].append("incomplete_ohlcv_amount")
@@ -221,7 +246,7 @@ class ResearchPipeline:
       status="succeeded" if success else "partial" if processed else "failed")
     report["report_snapshot"] = self.store.save_snapshot(
       pd.DataFrame([{"report": json.dumps(report, sort_keys=True)}]),
-      {"kind": "collection_report", "as_of": report["as_of"], "mode": report["mode"],
+      {"kind": "collection_report", "provider": report.get("provider", "akshare"), "as_of": report["as_of"], "mode": report["mode"],
        "collection_success": success, "collection_complete": complete,
        "selection": report["selection"]},
     )

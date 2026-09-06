@@ -22,6 +22,7 @@ function renderWorkspace() {
 function metric(name: string) { return within(screen.getByRole('group', { name })) }
 
 beforeEach(() => {
+  window.history.replaceState(null, '', '/#prediction')
   calls = []
   route = (path) => {
     if (path.includes('/symbols?')) return json({ items: [{ ticker: '000001.SZ', name: '测试股票乙', instrument_type: 'stock' }] })
@@ -287,12 +288,12 @@ describe('single-stock prediction workspace at the HTTP boundary', () => {
     expect(screen.queryByText('取消中，等待当前计算结束')).not.toBeInTheDocument()
   })
 
-  it('mounts advanced v1 requests only after expanding advanced research', async () => {
+  it('mounts advanced v1 requests only after visiting research experiments', async () => {
     const user = userEvent.setup()
     renderWorkspace()
     await screen.findByRole('heading', { name: '测试股票甲' })
     expect(calls.some((call) => call.path.includes('/health'))).toBe(false)
-    await user.click(screen.getByText('高级研究', { exact: true }))
+    await user.click(screen.getByRole('link', { name: '历史回测' }))
     expect(await screen.findByRole('button', { name: '开始回测' })).toBeVisible()
     await waitFor(() => expect(calls.some((call) => call.path.includes('/health'))).toBe(true))
   })

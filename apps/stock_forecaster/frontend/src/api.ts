@@ -1,3 +1,4 @@
+import type { EvidenceOverview } from './evidenceTypes'
 import type {
   BacktestResponse,
   ForecastRequest,
@@ -14,6 +15,7 @@ import type {
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000')
   .replace(/\/$/, '')
+const EVIDENCE_BASE_URL = (import.meta.env.VITE_EVIDENCE_API_BASE_URL ?? API_BASE_URL).replace(/\/$/, '')
 
 interface ErrorEnvelope {
   error?: {
@@ -48,6 +50,7 @@ async function request<T>(
   path: string,
   options: RequestInit = {},
   timeoutMs = 15_000,
+  baseUrl = API_BASE_URL,
 ): Promise<T> {
   const controller = new AbortController()
   const abort = () => controller.abort()
@@ -55,7 +58,7 @@ async function request<T>(
   if (options.signal?.aborted) controller.abort()
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const response = await fetch(`${API_BASE_URL}${path}`, {
+    const response = await fetch(`${baseUrl}${path}`, {
       ...options,
       headers: { 'Content-Type': 'application/json', ...options.headers },
       signal: controller.signal,
@@ -92,6 +95,7 @@ async function request<T>(
 }
 
 export const api = {
+  evidence: (signal?: AbortSignal) => request<EvidenceOverview>('/api/v2/evidence', { signal }, 15_000, EVIDENCE_BASE_URL),
   health: () => request<HealthResponse>('/api/v1/health'),
   quote: (ticker: string, source: QuoteSource = 'auto', signal?: AbortSignal) => request<QuoteResponse>(
     `/api/v1/quotes/${encodeURIComponent(ticker)}?source=${source}`,

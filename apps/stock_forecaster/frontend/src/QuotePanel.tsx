@@ -22,7 +22,7 @@ function compact(value: number | null): string {
   })
 }
 
-export function QuotePanel({ ticker }: { ticker: string }) {
+export function QuotePanel({ ticker, active = true }: { ticker: string; active?: boolean }) {
   const [source, setSource] = useState<QuoteSource>('auto')
   const [polling, setPolling] = useState(true)
   const symbol = ticker.trim().toUpperCase()
@@ -30,8 +30,8 @@ export function QuotePanel({ ticker }: { ticker: string }) {
   const quote = useQuery({
     queryKey: ['quote', symbol, source],
     queryFn: () => api.quote(symbol, source),
-    enabled: supported,
-    refetchInterval: polling ? 10_000 : false,
+    enabled: supported && active,
+    refetchInterval: polling && active ? 10_000 : false,
     refetchIntervalInBackground: false,
     staleTime: 5_000,
     retry: false,

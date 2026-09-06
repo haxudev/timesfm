@@ -140,14 +140,19 @@ class ResearchStore:
   a stale worker could complete; retries require a new idempotency key.
   """
 
-  def __init__(self, root: str | Path):
+  def __init__(self, root: str | Path, *, read_only: bool = False):
     self.root = Path(root).resolve()
-    self.root.mkdir(parents=True, exist_ok=True)
+    self.read_only = read_only
     self.snapshots_dir = self.root / "snapshots"
-    self.snapshots_dir.mkdir(exist_ok=True)
     self.db_path = self.root / "research.sqlite3"
     if self.snapshots_dir.resolve() != self.snapshots_dir:
       raise ValueError("Unsafe snapshots directory")
+    if read_only:
+      if not self.db_path.is_file() or self.db_path.is_symlink():
+        raise ValueError("Read-only store unavailable")
+      return
+    self.root.mkdir(parents=True, exist_ok=True)
+    self.snapshots_dir.mkdir(exist_ok=True)
     with self._connect() as connection:
       connection.execute("PRAGMA journal_mode=WAL")
       connection.executescript("""
@@ -194,10 +199,13 @@ class ResearchStore:
 
   @contextmanager
   def _connect(self, write: bool = False):
+    if self.read_only and write:
+      raise ValueError("Read-only store")
     if self.db_path.is_symlink():
       raise ValueError("Unsafe database path")
     with closing(sqlite3.connect(
-      self.db_path, timeout=5, isolation_level=None
+      self.db_path.as_uri() + "?mode=ro" if self.read_only else self.db_path,
+      uri=self.read_only, timeout=5, isolation_level=None
     )) as connection:
       connection.row_factory = sqlite3.Row
       connection.execute("PRAGMA busy_timeout=5000")
@@ -225,6 +233,8 @@ class ResearchStore:
     return row
 
   def save_snapshot(self, frame: pd.DataFrame, metadata: dict) -> str:
+    if self.read_only:
+      raise ValueError("Read-only store")
     metadata_json = _object_json(metadata)
     frame = frame.copy(deep=True)
     snapshot_id, schema = _identity(frame, metadata_json)

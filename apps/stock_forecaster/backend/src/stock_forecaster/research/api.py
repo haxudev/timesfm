@@ -27,6 +27,12 @@ def install_research_api(app, settings, market, manager):
   lock = threading.Lock()
   app.state.research_service = None
 
+  @router.get("/evidence")
+  async def evidence():
+    from .evidence import evidence_overview
+
+    return await asyncio.to_thread(evidence_overview, settings.research_data_dir)
+
   def service():
     with lock:
       if app.state.research_service is None:

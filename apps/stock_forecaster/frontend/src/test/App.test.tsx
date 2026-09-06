@@ -2,7 +2,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { AdvancedResearch as App } from '../App'
+import { useState } from 'react'
+import { MarketPage } from '../MarketPage'
+import { ForecastExperimentPage, HistoricalBacktestPage } from '../ResearchPages'
+import type { ResearchSymbol } from '../types'
 import { api, ApiError } from '../api'
 import { backtestFixture, forecastFixture } from './fixtures'
 
@@ -21,13 +24,18 @@ vi.mock('../api', async (importOriginal) => {
 
 const mockedApi = vi.mocked(api)
 
-function renderApp() {
+function MarketHarness() {
+  const [selected, setSelected] = useState<ResearchSymbol>({ ticker: '600519', name: null, instrument_type: 'stock' })
+  return <MarketPage selected={selected} onSelect={setSelected} />
+}
+
+function renderApp(page: 'market' | 'forecast' | 'backtest' = 'forecast') {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
   return render(
     <QueryClientProvider client={client}>
-      <App />
+      {page === 'market' ? <MarketHarness /> : page === 'backtest' ? <HistoricalBacktestPage /> : <ForecastExperimentPage />}
     </QueryClientProvider>,
   )
 }
@@ -56,9 +64,9 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe('advanced v1 research regression', () => {
+describe('extracted legacy capabilities on independent pages', () => {
   it('loads the default A-share snapshot with source, time, valuations and five levels', async () => {
-    renderApp()
+    renderApp('market')
     expect(await screen.findByText('贵州茅台')).toBeVisible()
     expect(screen.getByText('20.42')).toBeVisible()
     expect(screen.getByText('6.62')).toBeVisible()
@@ -70,7 +78,7 @@ describe('advanced v1 research regression', () => {
 
   it('switches quote sources without running the forecast', async () => {
     const user = userEvent.setup()
-    renderApp()
+    renderApp('market')
     await screen.findByText('贵州茅台')
     expect(screen.getByRole('option', { name: 'TX' })).toHaveValue('tencent')
     expect(screen.getByRole('option', { name: 'XL' })).toHaveValue('sina')
@@ -79,16 +87,17 @@ describe('advanced v1 research regression', () => {
     expect(mockedApi.forecast).not.toHaveBeenCalled()
   })
 
-  it('keeps quote failures separate from forecast controls', async () => {
+  it('keeps quote failures on the read-only market page', async () => {
     mockedApi.quote.mockRejectedValue(new ApiError('Quote upstream unavailable', 'server', 'quote_unavailable'))
-    renderApp()
+    renderApp('market')
     expect(await screen.findByRole('alert')).toHaveTextContent('行情暂不可用')
-    expect(screen.getByRole('button', { name: '开始预测' })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: '开始预测' })).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '查看预测' })).toBeVisible()
   })
 
-  it('shows the requested brand and keeps only the financial notice', async () => {
+  it('shows research scope without exposing model configuration secrets', async () => {
     renderApp()
-    expect(screen.getByRole('heading', { level: 1, name: '牛来 · 大A 行情预测' })).toBeVisible()
+    expect(screen.getByRole('heading', { name: '预测实验' })).toBeVisible()
     expect(screen.getByText(/不构成投资建议/)).toBeVisible()
     expect(screen.queryByText(/模型许可|仅限非商业、非生产用途/)).not.toBeInTheDocument()
   })
@@ -134,10 +143,13 @@ describe('advanced v1 research regression', () => {
     renderApp()
     await user.click(screen.getByRole('button', { name: '开始预测' }))
     expect((await screen.findAllByText('101.00'))[0]).toBeVisible()
-    expect(screen.getByText('时序模型 · 处理器')).toBeVisible()
+    expect(screen.getByText(/时序模型 · 处理器/)).toBeVisible()
     expect(screen.getAllByText('1.00%')[0]).toBeVisible()
-    expect(screen.getByRole('img', { name: '历史走势' })).toBeVisible()
     expect(screen.getByRole('img', { name: '预测走势与近似区间' })).toBeVisible()
+    expect(screen.queryByRole('img', { name: '历史走势' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('radio', { name: '历史行情' }))
+    expect(screen.getByRole('img', { name: '历史走势' })).toBeVisible()
+    await user.click(screen.getByRole('radio', { name: '收益分布' }))
     const returnsChart = screen.getByRole('img', { name: '预测对数收益率' })
     const series = JSON.parse(returnsChart.dataset.series ?? '[]') as Array<{
       y: number[]
@@ -161,13 +173,38 @@ describe('advanced v1 research regression', () => {
   it('renders independent backtest comparisons', async () => {
     const user = userEvent.setup()
     mockedApi.backtest.mockResolvedValue(backtestFixture)
-    renderApp()
+    renderApp('backtest')
     await user.click(screen.getByRole('button', { name: '开始回测' }))
     expect(await screen.findByText('零收益基线')).toBeVisible()
     expect(screen.getByText('时序模型', { exact: true })).toBeVisible()
     expect(screen.getByText('历史均值基线')).toBeVisible()
     expect(screen.getByText('随机游走基线')).toBeVisible()
     expect(screen.getByText(/历史回测不代表未来表现/)).toBeVisible()
+  })
+
+  it.each(['forecast', 'backtest'] as const)('identifies the submitted parameters when the %s form changes', async (kind) => {
+    mockedApi.forecast.mockResolvedValue(forecastFixture)
+    mockedApi.backtest.mockResolvedValue(backtestFixture)
+    renderApp(kind)
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: kind === 'forecast' ? '开始预测' : '开始回测' }))
+    expect(await screen.findByLabelText('结果参数')).toHaveTextContent('600519')
+    await user.clear(screen.getByLabelText('股票代码'))
+    await user.type(screen.getByLabelText('股票代码'), '002594')
+    expect(screen.getByText('参数已变更，当前结果仍对应上次提交。')).toBeVisible()
+    expect(screen.getByLabelText('结果参数')).toHaveTextContent('600519')
+    expect(screen.getByLabelText('结果参数')).not.toHaveTextContent('002594')
+    expect(kind === 'forecast' ? mockedApi.forecast : mockedApi.backtest).toHaveBeenCalledTimes(1)
+  })
+
+  it('exposes custom horizons as an explicit radio choice', async () => {
+    renderApp()
+    const user = userEvent.setup()
+    fireEvent.change(screen.getByLabelText('预测天数'), { target: { value: '7' } })
+    expect(screen.getByRole('radio', { name: '自定义' })).toBeChecked()
+    expect(screen.getByRole('radiogroup', { name: '预测期限' })).toBeVisible()
+    await user.click(screen.getByRole('radio', { name: '5 日' }))
+    expect(screen.getByLabelText('预测天数')).toHaveValue(5)
   })
 
   it.each([1, 3, 5, 10, 20, 60])('submits the selected %i-day index forecast', async (horizon) => {
@@ -190,14 +227,14 @@ describe('advanced v1 research regression', () => {
     mockedApi.quote.mockImplementation(async (ticker) => ticker === '600519' ? quote : ({
       ...quote, ticker, name: '沪深300', instrument_type: 'index', bids: [], asks: [],
     }))
-    renderApp()
+    renderApp('market')
     await user.click(screen.getByRole('radio', { name: '大盘指数' }))
     await user.selectOptions(screen.getByLabelText('指数'), '000300.SS')
     await waitFor(() => expect(screen.getByRole('heading', { name: '沪深300' })).toBeVisible())
     expect(screen.queryByRole('table', { name: '五档盘口（股）' })).not.toBeInTheDocument()
     expect(screen.getByText('点')).toBeVisible()
     await user.click(screen.getByRole('radio', { name: '个股' }))
-    expect(screen.getByLabelText('股票代码')).toHaveValue('600519')
+    expect(await screen.findByRole('heading', { name: '贵州茅台' })).toBeVisible()
     expect(await screen.findByRole('table', { name: '五档盘口（股）' })).toBeVisible()
   })
 })

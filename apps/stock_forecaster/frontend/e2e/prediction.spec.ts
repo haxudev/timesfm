@@ -85,7 +85,7 @@ test('stock search, submission, polling completion and local horizons render a r
       : { id: 'fixture-job', status: 'succeeded', cancellation_requested: false, result: bundle, error: null } }
     return absent
   })
-  await page.goto('/')
+  await page.goto('/#prediction')
   await expect(page.getByText('暂无预测，请生成预测。')).toBeVisible()
   expect(calls.some((call) => call.path === '/api/v2/predictions/600519.SS/latest')).toBe(true)
   expect(calls.filter((call) => call.method === 'POST')).toHaveLength(0)
@@ -125,7 +125,7 @@ test('switching stock ignores the old in-flight job result', async ({ page }) =>
     }
     return absent
   })
-  await page.goto('/')
+  await page.goto('/#prediction')
   await page.getByRole('button', { name: '生成预测' }).click()
   await expect.poll(() => oldRequested).toBe(true)
   await chooseSecondStock(page)
@@ -143,7 +143,7 @@ test('partial models have nullable signals and no invented LightGBM chart', asyn
     'TimesFM checkpoint name is recorded; an immutable weight revision is not pinned.',
   ]
   await intercept(page, (call) => call.path.endsWith('/latest') ? { body: bundle } : quoteFixture())
-  await page.goto('/')
+  await page.goto('/#prediction')
   await expect(page.getByText('部分模型不可用', { exact: true })).toBeVisible()
   await expect(page.getByRole('group', { name: '预测累计收益' })).toContainText('TimesFM')
   await expect(page.getByRole('group', { name: '上涨概率' })).toContainText('--')
@@ -164,7 +164,7 @@ test('no models never manufacture success, a stock name or a probability', async
   bundle.path = []
   bundle.horizons.forEach((item) => { item.timesfm_return = null })
   await intercept(page, (call) => call.path.endsWith('/latest') ? { body: bundle } : absent)
-  await page.goto('/')
+  await page.goto('/#prediction')
   await expect(page.getByText('暂无可用模型', { exact: true })).toBeVisible()
   await expect(page.getByRole('heading', { name: '600519.SS' })).toBeVisible()
   await expect(page.getByRole('group', { name: '预测累计收益' })).toContainText('--')
@@ -190,7 +190,7 @@ for (const initialStatus of ['pending', 'running'] as const) {
       }
       return absent
     })
-    await page.goto('/')
+    await page.goto('/#prediction')
     await page.getByRole('button', { name: '生成预测' }).click()
     await expect(page.getByText(initialStatus === 'pending' ? '排队中…' : '正在生成预测…', { exact: true })).toBeVisible()
     const cancel = page.getByRole('button', { name: '取消任务' })

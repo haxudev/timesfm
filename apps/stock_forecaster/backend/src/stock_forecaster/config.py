@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 DEFAULT_CHECKPOINT = "google/timesfm-3.0-pytorch"
@@ -44,6 +44,10 @@ class Settings(BaseSettings):
   internal_token_file: Path | None = None
   research_http_url: str = "http://backend:8000"
   worker_poll_seconds: float = Field(2.0, ge=0.1, le=60, allow_inf_nan=False)
+  tushare_api_key: SecretStr | None = Field(
+    default=None, validation_alias=AliasChoices("TUSHARE_API_KEY", "STOCK_FORECASTER_TUSHARE_API_KEY"),
+    exclude=True, repr=False,
+  )
 
   @field_validator("research_http_url")
   @classmethod
